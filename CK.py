@@ -337,15 +337,21 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
         "name":       "Closed Incidents By Module",
         "categories": [SUMMARY_SHEET_NAME, DATA_START, 1, DATA_START + n - 1, 1],
         "values":     [SUMMARY_SHEET_NAME, DATA_START, 2, DATA_START + n - 1, 2],
+        "data_labels": {
+            "category":   True,    # module name
+            "value":      True,    # raw count
+            "percentage": True,    # % of total
+            "separator":  "\n",    # each on its own line
+            "font":       {"bold": True, "size": 9},
+        },
     })
     pie1.set_title({"name": "Closed Incidents By Module"})
+    pie1.set_legend({"position": "bottom"})
     pie1.set_style(10)
-    pie1.set_size({"width": 420, "height": 300})
+    pie1.set_size({"width": 480, "height": 340})
     sw.insert_chart(TOTAL_ROW + 2, 0, pie1)
 
     # ── PIE 2 — Overall Incident Status (all data, unique IDs) ───────────────
-    # Status data is written to a dedicated hidden sheet so Excel fully renders
-    # the chart. Hiding the *columns* that a chart references blanks it out.
     ns = len(status_labels)
     if ns > 0:
         STATUS_SHEET = "Status Data"
@@ -359,10 +365,18 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
             "name":       "Overall Incident Status",
             "categories": [STATUS_SHEET, 0, 0, ns - 1, 0],
             "values":     [STATUS_SHEET, 0, 1, ns - 1, 1],
+            "data_labels": {
+                "category":   True,
+                "value":      True,
+                "percentage": True,
+                "separator":  "\n",
+                "font":       {"bold": True, "size": 9},
+            },
         })
         pie2.set_title({"name": "Overall Incident Status (All Modules, Unique IDs)"})
+        pie2.set_legend({"position": "bottom"})
         pie2.set_style(10)
-        pie2.set_size({"width": 420, "height": 300})
+        pie2.set_size({"width": 480, "height": 340})
         sw.insert_chart(TOTAL_ROW + 2, 7, pie2)
 
     # ── DATA SHEETS — only modules with incidents, only counted rows ─────────
