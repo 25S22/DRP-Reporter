@@ -2,20 +2,20 @@
 =============================================================================
 INCIDENT REPORT GENERATOR
 =============================================================================
-CONFIGURATION (only 3 things to set):
-  INPUT_FILE_PATH  — path to the source Excel workbook
-  COL_INCIDENT_ID  — exact column name for the Incident ID
-  COL_CLOSURE_DATE — exact column name for the Closure Date
+CONFIGURATION — only 3 things to set:
+  INPUT_FILE_PATH  : path to the source Excel workbook
+  COL_INCIDENT_ID  : exact column name for the Incident ID
+  COL_CLOSURE_DATE : exact column name for the Closure Date
 
-Everything else — date range (prompted at runtime), number of modules,
-chart layout — is handled automatically.
+Everything else is automatic:
+  - Date range is prompted interactively at runtime
+  - Any number of sheets / modules is handled (1 to 20+)
+  - Only modules with incidents in the range appear in charts/summary
+  - Sheet names are used directly as Module names
+  - Date formats like "2 Mar 2026", "2nd March 2026", "01/03/2026" all work
 
-Each sheet in the workbook is treated as one module.
-Modules with zero incidents in the range are excluded from charts/summary
-but their data sheets are still written to the output file.
-
-Date formats like "2 Mar 2026", "2nd March 2026", "03/02/2026", "2026-03-02"
-are all parsed correctly.
+Dependencies:  pip install pandas xlsxwriter openpyxl
+  (openpyxl is used only to READ the input file; xlsxwriter handles all output)
 =============================================================================
 """
 
@@ -25,11 +25,7 @@ import sys
 from datetime import datetime
 
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.chart import BarChart, PieChart, Reference
-from openpyxl.utils import get_column_letter
-
+import xlsxwriter
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -42,49 +38,17 @@ COL_INCIDENT_ID  = "Incident Id"
 COL_CLOSURE_DATE = "Incident Closure on"
 
 # =============================================================================
-# INTERNALS — do not edit below this line
+# INTERNALS
 # =============================================================================
 
 OUTPUT_FILE_PATH   = "incidents_report.xlsx"
 SUMMARY_SHEET_NAME = "Summary Dashboard"
 
 # ---------------------------------------------------------------------------
-# STYLES
-# ---------------------------------------------------------------------------
-
-def _border(style="thin"):
-    s = Side(style=style)
-    return Border(left=s, right=s, top=s, bottom=s)
-
-def _thick_border():
-    m = Side(style="medium")
-    return Border(left=m, right=m, top=m, bottom=m)
-
-NAVY       = "1F3864"
-MID_BLUE   = "2E75B6"
-LIGHT_BLUE = "D6E4F7"
-ALT_BLUE   = "EFF5FB"
-WHITE      = "FFFFFF"
-
-HEADER_FILL = PatternFill("solid", start_color=NAVY)
-SUBHDR_FILL = PatternFill("solid", start_color=MID_BLUE)
-TOTAL_FILL  = PatternFill("solid", start_color=LIGHT_BLUE)
-ALT_FILL    = PatternFill("solid", start_color=ALT_BLUE)
-WHITE_FILL  = PatternFill("solid", start_color=WHITE)
-
-H_FONT   = Font(name="Arial", bold=True, color=WHITE,    size=11)
-D_FONT   = Font(name="Arial",            color="000000", size=10)
-T_FONT   = Font(name="Arial", bold=True, color=NAVY,     size=11)
-BIG_FONT = Font(name="Arial", bold=True, color=WHITE,    size=15)
-
-CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
-LEFT   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
-
-# ---------------------------------------------------------------------------
 # DATE PARSING
 # ---------------------------------------------------------------------------
 
-_ORDINAL_RE  = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
+_ORDINAL_RE   = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
 _DATE_FORMATS = [
     "%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%d-%B-%Y",
     "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%d.%m.%Y",
@@ -101,10 +65,8 @@ def _parse_date_series(series):
     for fmt in _DATE_FORMATS:
         if not parsed.isna().any():
             break
-        still_bad = parsed.isna()
-        parsed[still_bad] = pd.to_datetime(
-            cleaned[still_bad], format=fmt, errors="coerce"
-        )
+        bad = parsed.isna()
+        parsed[bad] = pd.to_datetime(cleaned[bad], format=fmt, errors="coerce")
     return parsed
 
 def _prompt_date(label):
@@ -139,15 +101,11 @@ def process_sheet(df, start_dt, end_dt):
     df = df.copy()
     if COL_CLOSURE_DATE not in df.columns:
         return df, pd.DataFrame(columns=df.columns)
-
     df[COL_CLOSURE_DATE] = _parse_date_series(df[COL_CLOSURE_DATE])
-
     mask     = (df[COL_CLOSURE_DATE] >= start_dt) & (df[COL_CLOSURE_DATE] <= end_dt)
     filtered = df[mask].copy()
-
     if COL_INCIDENT_ID in filtered.columns:
         filtered = filtered.drop_duplicates(subset=[COL_INCIDENT_ID])
-
     return df, filtered
 
 # ---------------------------------------------------------------------------
@@ -155,225 +113,254 @@ def process_sheet(df, start_dt, end_dt):
 # ---------------------------------------------------------------------------
 
 def aggregate(counts):
-    """
-    Sheet names ARE the module names.
-    Only modules with >= 1 incident in range enter the summary/charts.
-    """
     rows = [
         {"Module Name": k, "Unique Closed Incidents": v}
-        for k, v in counts.items()
-        if v > 0
+        for k, v in counts.items() if v > 0
     ]
     if not rows:
-        sys.exit("\nNo incidents found in the specified date range across any sheet.\n")
+        sys.exit("\nNo incidents found in the specified date range.\n")
     return pd.DataFrame(rows)
 
 # ---------------------------------------------------------------------------
-# STEP 4a — SUMMARY TABLE
+# STEP 4 — BUILD OUTPUT WORKBOOK  (xlsxwriter — write-only, reliable charts)
 # ---------------------------------------------------------------------------
 
-def _write_summary_table(ws, summary_df, start_row):
-    """
-    Writes the styled summary table into ws starting at start_row.
-    Returns (header_row, total_row) so chart anchors can be calculated.
-    """
-    # Section title
-    ws.row_dimensions[start_row].height = 24
-    title_cell = ws.cell(row=start_row, column=1,
-                         value="Module-wise Unique Closed Incidents")
-    title_cell.font      = Font(name="Arial", bold=True, size=13, color=NAVY)
-    title_cell.alignment = LEFT
-    ws.merge_cells(start_row=start_row, start_column=1,
-                   end_row=start_row,   end_column=3)
+def build_workbook(summary_df, processed_raw, sheet_names, start_dt, end_dt):
 
-    # Column headers
-    header_row = start_row + 1
-    ws.row_dimensions[header_row].height = 22
-    for col, text in enumerate(["#", "Module Name", "Unique Closed Incidents"], 1):
-        cell = ws.cell(row=header_row, column=col, value=text)
-        cell.font      = H_FONT
-        cell.fill      = HEADER_FILL
-        cell.alignment = CENTER
-        cell.border    = _border()
+    wb = xlsxwriter.Workbook(OUTPUT_FILE_PATH)
 
-    # Data rows — one per module that has incidents
-    n = len(summary_df)
-    for i, row in enumerate(summary_df.itertuples(index=False), 1):
-        r    = header_row + i
-        fill = ALT_FILL if i % 2 == 0 else WHITE_FILL
-        ws.row_dimensions[r].height = 18
-        d    = row._asdict()
+    # ── FORMATS ──────────────────────────────────────────────────────────────
+    NAVY    = "#1F3864"
+    MIDBLUE = "#2E75B6"
+    LTBLUE  = "#D6E4F7"
+    ALT     = "#EFF5FB"
+    WHITE   = "#FFFFFF"
 
-        for col_idx, val in enumerate(
-            [i, d["Module Name"], d["Unique Closed Incidents"]], 1
-        ):
-            cell = ws.cell(row=r, column=col_idx, value=val)
-            cell.font      = D_FONT
-            cell.fill      = fill
-            cell.border    = _border()
-            cell.alignment = LEFT if col_idx == 2 else CENTER
+    def _fmt(d):
+        return wb.add_format(d)
 
-    # Total row
-    total_row = header_row + n + 1
-    ws.row_dimensions[total_row].height = 22
-    for col in [1, 2, 3]:
-        cell           = ws.cell(row=total_row, column=col)
-        cell.fill      = TOTAL_FILL
-        cell.border    = _thick_border()
-        cell.font      = T_FONT
-        cell.alignment = CENTER
-    ws.cell(row=total_row, column=1, value="TOTAL")
-    ws.merge_cells(start_row=total_row, start_column=1,
-                   end_row=total_row,   end_column=2)
-    ws.cell(row=total_row, column=3,
-            value=f"=SUM(C{header_row + 1}:C{total_row - 1})")
+    f_banner = _fmt({
+        "bold": True, "font_name": "Arial", "font_size": 15,
+        "font_color": WHITE, "bg_color": NAVY,
+        "align": "center", "valign": "vcenter",
+    })
+    f_section = _fmt({
+        "bold": True, "font_name": "Arial", "font_size": 13,
+        "font_color": NAVY, "valign": "vcenter",
+    })
+    f_col_hdr = _fmt({
+        "bold": True, "font_name": "Arial", "font_size": 11,
+        "font_color": WHITE, "bg_color": NAVY,
+        "align": "center", "valign": "vcenter", "border": 1,
+    })
+    f_num = _fmt({
+        "font_name": "Arial", "font_size": 10,
+        "align": "center", "valign": "vcenter", "border": 1,
+    })
+    f_lft = _fmt({
+        "font_name": "Arial", "font_size": 10,
+        "align": "left", "valign": "vcenter", "border": 1,
+    })
+    f_num_alt = _fmt({
+        "font_name": "Arial", "font_size": 10,
+        "align": "center", "valign": "vcenter", "border": 1, "bg_color": ALT,
+    })
+    f_lft_alt = _fmt({
+        "font_name": "Arial", "font_size": 10,
+        "align": "left", "valign": "vcenter", "border": 1, "bg_color": ALT,
+    })
+    f_total_merge = _fmt({
+        "bold": True, "font_name": "Arial", "font_size": 11,
+        "font_color": NAVY, "bg_color": LTBLUE,
+        "align": "center", "valign": "vcenter", "border": 2,
+    })
+    f_total_val = _fmt({
+        "bold": True, "font_name": "Arial", "font_size": 11,
+        "font_color": NAVY, "bg_color": LTBLUE,
+        "align": "center", "valign": "vcenter", "border": 2,
+    })
+    f_data_hdr = _fmt({
+        "bold": True, "font_name": "Arial", "font_size": 10,
+        "font_color": WHITE, "bg_color": MIDBLUE,
+        "align": "center", "valign": "vcenter", "border": 1,
+    })
+    f_cell = _fmt({
+        "font_name": "Arial", "font_size": 10,
+        "align": "left", "valign": "vcenter", "border": 1,
+    })
+    f_cell_alt = _fmt({
+        "font_name": "Arial", "font_size": 10,
+        "align": "left", "valign": "vcenter", "border": 1, "bg_color": ALT,
+    })
+    f_date = _fmt({
+        "font_name": "Arial", "font_size": 10,
+        "align": "left", "valign": "vcenter", "border": 1,
+        "num_format": "dd mmm yyyy",
+    })
+    f_date_alt = _fmt({
+        "font_name": "Arial", "font_size": 10,
+        "align": "left", "valign": "vcenter", "border": 1, "bg_color": ALT,
+        "num_format": "dd mmm yyyy",
+    })
 
-    # Column widths
-    ws.column_dimensions["A"].width = 6
-    ws.column_dimensions["B"].width = max(
-        summary_df["Module Name"].astype(str).str.len().max() + 6, 24
-    )
-    ws.column_dimensions["C"].width = 28
+    # ── SUMMARY SHEET ─────────────────────────────────────────────────────────
+    #
+    # xlsxwriter uses 0-indexed (row, col) everywhere EXCEPT formula strings
+    # which use standard Excel A1 notation (1-indexed).
+    #
+    # Layout (0-indexed rows):
+    #   row 0  : banner
+    #   row 1  : (empty spacer)
+    #   row 2  : section title
+    #   row 3  : column headers  (#, Module Name, Unique Closed Incidents)
+    #   row 4  : first data row
+    #   ...
+    #   row 4+n-1 : last data row
+    #   row 4+n   : TOTAL row
+    #
+    n            = len(summary_df)
+    DATA_ROW_0   = 4          # 0-indexed first data row
+    total_row_0  = DATA_ROW_0 + n   # 0-indexed total row
 
-    return header_row, total_row
+    # Excel 1-indexed equivalents for formula only
+    excel_data_start = DATA_ROW_0 + 1        # = 5
+    excel_data_end   = DATA_ROW_0 + n        # = 4+n
+    sum_formula      = f"=SUM(C{excel_data_start}:C{excel_data_end})"
 
-# ---------------------------------------------------------------------------
-# STEP 4b — CHARTS
-# ---------------------------------------------------------------------------
-
-def _build_bar_chart(ws, n_modules, header_row):
-    """
-    Single-series bar chart — the simplest, most reliable approach.
-    openpyxl writes one <ser> element; Excel/LibreOffice assign distinct
-    theme colours to each bar automatically.  No DataPoint manipulation,
-    no series.clear(), no global state needed.
-    """
-    bar = BarChart()
-    bar.type         = "col"
-    bar.grouping     = "clustered"
-    bar.title        = "Unique Closed Incidents by Module"
-    bar.y_axis.title = "Count"
-    bar.x_axis.title = "Module"
-    bar.style        = 10
-    bar.width        = min(max(n_modules * 3.5, 20), 36)
-    bar.height       = 14
-
-    # Data reference includes the header row so the legend label is set
-    data = Reference(ws, min_col=3, min_row=header_row,
-                     max_col=3, max_row=header_row + n_modules)
-    cats = Reference(ws, min_col=2, min_row=header_row + 1,
-                     max_row=header_row + n_modules)
-
-    bar.add_data(data, titles_from_data=True)
-    bar.set_categories(cats)
-
-    return bar
-
-
-def _build_pie_chart(ws, n_modules, header_row):
-    """
-    Single-series pie chart — openpyxl natively colours each slice when
-    there is one series with multiple categories.
-    """
-    pie = PieChart()
-    pie.title  = "Incident Share by Module"
-    pie.style  = 10
-    pie.width  = 20
-    pie.height = 14
-
-    data = Reference(ws, min_col=3, min_row=header_row,
-                     max_col=3, max_row=header_row + n_modules)
-    cats = Reference(ws, min_col=2, min_row=header_row + 1,
-                     max_row=header_row + n_modules)
-
-    pie.add_data(data, titles_from_data=True)
-    pie.set_categories(cats)
-
-    return pie
-
-# ---------------------------------------------------------------------------
-# STEP 4c — ASSEMBLE SUMMARY SHEET
-# ---------------------------------------------------------------------------
-
-def build_summary_sheet(wb, summary_df, start_dt, end_dt):
-    ws = wb.create_sheet(SUMMARY_SHEET_NAME, 0)
-
-    date_range_str = (
-        f"{start_dt.strftime('%d %b %Y')}  ->  {end_dt.strftime('%d %b %Y')}"
-    )
+    sw = wb.add_worksheet(SUMMARY_SHEET_NAME)
 
     # Banner
-    ws.row_dimensions[1].height = 42
-    banner = ws.cell(row=1, column=1,
-                     value=f"Incident Summary Dashboard  |  {date_range_str}")
-    banner.font      = BIG_FONT
-    banner.fill      = HEADER_FILL
-    banner.alignment = CENTER
-    ws.merge_cells("A1:P1")
+    sw.set_row(0, 42)
+    sw.merge_range(
+        0, 0, 0, 15,
+        f"Incident Summary Dashboard  |  "
+        f"{start_dt.strftime('%d %b %Y')}  ->  {end_dt.strftime('%d %b %Y')}",
+        f_banner,
+    )
 
-    # Table
-    header_row, total_row = _write_summary_table(ws, summary_df, start_row=3)
+    # Section title
+    sw.set_row(2, 24)
+    sw.write(2, 0, "Module-wise Unique Closed Incidents", f_section)
 
-    # Charts anchored below the table
-    n         = len(summary_df)
-    chart_row = total_row + 2
-
-    bar = _build_bar_chart(ws, n, header_row)
-    ws.add_chart(bar, f"A{chart_row}")
-
-    # Pie placed to the right — offset by bar width in column units (~7.5 per unit)
-    pie_col     = max(round(bar.width / 7.5) + 2, 2)
-    pie_anchor  = f"{get_column_letter(pie_col)}{chart_row}"
-    pie = _build_pie_chart(ws, n, header_row)
-    ws.add_chart(pie, pie_anchor)
-
-    ws.freeze_panes = "A4"
-
-# ---------------------------------------------------------------------------
-# STEP 4d — DATA SHEETS
-# ---------------------------------------------------------------------------
-
-def _write_data_sheet(ws, df):
-    """
-    Writes ALL rows (full date range) with styled headers and AutoFilter
-    dropdown arrows on every column so the user can filter freely in Excel.
-    """
-    if df.empty:
-        return
-
-    headers = list(df.columns)
-    n_cols  = len(headers)
-
-    # Header row
-    ws.row_dimensions[1].height = 20
-    for col_idx, h in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col_idx, value=h)
-        cell.font      = Font(name="Arial", bold=True, color=WHITE, size=10)
-        cell.fill      = SUBHDR_FILL
-        cell.alignment = CENTER
-        cell.border    = _border()
-        ws.column_dimensions[get_column_letter(col_idx)].width = max(
-            len(str(h)) + 4, 14
-        )
+    # Column headers
+    sw.set_row(3, 22)
+    sw.write(3, 0, "#",                      f_col_hdr)
+    sw.write(3, 1, "Module Name",             f_col_hdr)
+    sw.write(3, 2, "Unique Closed Incidents", f_col_hdr)
 
     # Data rows
-    for row_idx, row_data in enumerate(df.itertuples(index=False), 2):
-        fill = ALT_FILL if row_idx % 2 == 0 else WHITE_FILL
-        ws.row_dimensions[row_idx].height = 16
-        for col_idx, val in enumerate(row_data, 1):
-            try:
-                if pd.isna(val):
-                    val = None
-            except (TypeError, ValueError):
-                pass
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            cell.font      = D_FONT
-            cell.fill      = fill
-            cell.alignment = LEFT
-            cell.border    = _border()
+    for i, row in enumerate(summary_df.itertuples(index=False)):
+        r   = DATA_ROW_0 + i
+        d   = row._asdict()
+        alt = (i % 2 == 1)
+        sw.set_row(r, 18)
+        sw.write(r, 0, i + 1,                         f_num_alt if alt else f_num)
+        sw.write(r, 1, d["Module Name"],               f_lft_alt if alt else f_lft)
+        sw.write(r, 2, d["Unique Closed Incidents"],   f_num_alt if alt else f_num)
 
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{len(df) + 1}"
+    # Total row
+    sw.set_row(total_row_0, 22)
+    sw.merge_range(total_row_0, 0, total_row_0, 1, "TOTAL", f_total_merge)
+    sw.write_formula(total_row_0, 2, sum_formula, f_total_val)
+
+    # Column widths
+    sw.set_column(0, 0, 6)
+    sw.set_column(1, 1, max(
+        summary_df["Module Name"].astype(str).str.len().max() + 6, 24
+    ))
+    sw.set_column(2, 2, 28)
+
+    # Freeze pane below banner + spacer + section title
+    sw.freeze_panes(3, 0)
+
+    # ── BAR CHART ────────────────────────────────────────────────────────────
+    #
+    # xlsxwriter chart series references:
+    #   [sheet_name, first_row, first_col, last_row, last_col]  — all 0-indexed
+    #
+    bar = wb.add_chart({"type": "column"})
+    bar.add_series({
+        "name":       "Incidents",
+        "categories": [SUMMARY_SHEET_NAME,
+                       DATA_ROW_0, 1, DATA_ROW_0 + n - 1, 1],
+        "values":     [SUMMARY_SHEET_NAME,
+                       DATA_ROW_0, 2, DATA_ROW_0 + n - 1, 2],
+        "gap":        100,
+    })
+    bar.set_title({"name": "Unique Closed Incidents by Module"})
+    bar.set_x_axis({"name": "Module"})
+    bar.set_y_axis({"name": "Count"})
+    bar.set_style(10)
+    bar_px_w = min(max(n * 90, 400), 720)
+    bar.set_size({"width": bar_px_w, "height": 300})
+    sw.insert_chart(total_row_0 + 2, 0, bar)
+
+    # ── PIE CHART ────────────────────────────────────────────────────────────
+    pie = wb.add_chart({"type": "pie"})
+    pie.add_series({
+        "name":       "Incidents",
+        "categories": [SUMMARY_SHEET_NAME,
+                       DATA_ROW_0, 1, DATA_ROW_0 + n - 1, 1],
+        "values":     [SUMMARY_SHEET_NAME,
+                       DATA_ROW_0, 2, DATA_ROW_0 + n - 1, 2],
+    })
+    pie.set_title({"name": "Incident Share by Module"})
+    pie.set_style(10)
+    pie.set_size({"width": 420, "height": 300})
+    # Offset pie to the right of bar — 64px ≈ 1 default Excel column
+    pie_col_offset = round(bar_px_w / 64) + 1
+    sw.insert_chart(total_row_0 + 2, pie_col_offset, pie)
+
+    # ── DATA SHEETS ──────────────────────────────────────────────────────────
+    for name in sheet_names:
+        df = processed_raw[name]
+        # Excel sheet names max 31 chars
+        safe_name = name[:31]
+        dw = wb.add_worksheet(safe_name)
+
+        if df.empty:
+            continue
+
+        headers = list(df.columns)
+        n_cols  = len(headers)
+        n_rows  = len(df)
+
+        # Header row (0-indexed row 0)
+        dw.set_row(0, 20)
+        for ci, h in enumerate(headers):
+            dw.write(0, ci, h, f_data_hdr)
+            dw.set_column(ci, ci, max(len(str(h)) + 4, 14))
+
+        # Data rows
+        for ri, row_data in enumerate(df.itertuples(index=False), 1):
+            dw.set_row(ri, 16)
+            alt = (ri % 2 == 0)
+            for ci, val in enumerate(row_data):
+                # Coerce NaT / NaN to None
+                try:
+                    if pd.isna(val):
+                        val = None
+                except (TypeError, ValueError):
+                    pass
+
+                is_date_col = (headers[ci] == COL_CLOSURE_DATE)
+
+                if val is None:
+                    fmt = f_date_alt if (is_date_col and alt) else \
+                          f_date    if is_date_col else \
+                          f_cell_alt if alt else f_cell
+                    dw.write_blank(ri, ci, None, fmt)
+                elif isinstance(val, pd.Timestamp):
+                    fmt = f_date_alt if alt else f_date
+                    dw.write_datetime(ri, ci, val.to_pydatetime(), fmt)
+                else:
+                    fmt = f_cell_alt if alt else f_cell
+                    dw.write(ri, ci, val, fmt)
+
+        dw.freeze_panes(1, 0)
+        dw.autofilter(0, 0, n_rows, n_cols - 1)
+
+    wb.close()
 
 # ---------------------------------------------------------------------------
 # MAIN
@@ -383,7 +370,7 @@ def main():
     print("\n" + "=" * 60)
     print("  INCIDENT REPORT GENERATOR")
     print("=" * 60)
-    print("\nPlease enter the date range for filtering closed incidents.")
+    print("\nEnter the date range for filtering closed incidents.")
 
     start_dt = _prompt_date("START date (inclusive)")
     end_dt   = _prompt_date("END   date (inclusive)")
@@ -403,9 +390,9 @@ def main():
     processed_raw = {}
     counts        = {}
     for name in sheet_names:
-        raw_df, filtered_df   = process_sheet(raw_sheets[name], start_dt, end_dt)
-        processed_raw[name]   = raw_df
-        counts[name]          = len(filtered_df)
+        raw_df, filtered_df = process_sheet(raw_sheets[name], start_dt, end_dt)
+        processed_raw[name] = raw_df
+        counts[name]        = len(filtered_df)
         status = (f"{counts[name]} unique incident(s) in range"
                   if counts[name] else "no incidents in range")
         print(f"  [{name}]  total rows = {len(raw_df)}  |  {status}")
@@ -415,22 +402,14 @@ def main():
     grand_total = summary_df["Unique Closed Incidents"].sum()
     active      = len(summary_df)
     skipped     = len(sheet_names) - active
-    print(f"\n  Modules with incidents  : {active}")
+    print(f"\n  Modules with incidents : {active}")
     if skipped:
-        print(f"  Modules with zero hits  : {skipped} (sheets written, excluded from charts)")
-    print(f"  Grand total             : {grand_total}")
+        print(f"  Modules skipped (zero) : {skipped}  (sheets still written to output)")
+    print(f"  Grand total            : {grand_total}")
 
     # Step 4
-    wb = Workbook()
-    wb.remove(wb.active)   # remove openpyxl's default blank sheet
+    build_workbook(summary_df, processed_raw, sheet_names, start_dt, end_dt)
 
-    build_summary_sheet(wb, summary_df, start_dt, end_dt)
-
-    for name in sheet_names:
-        ws = wb.create_sheet(title=name)
-        _write_data_sheet(ws, processed_raw[name])
-
-    wb.save(OUTPUT_FILE_PATH)
     print(f"\n  Report saved -> {OUTPUT_FILE_PATH}")
     print("Done.\n")
 
