@@ -202,7 +202,7 @@ def compute_status_breakdown(processed_raw, sheet_names):
 # ---------------------------------------------------------------------------
 
 def build_workbook(module_names, module_counts, status_labels, status_counts,
-                   processed_raw, sheet_names, start_dt, end_dt):
+                   filtered_raw, counts, sheet_names, start_dt, end_dt):
 
     wb = xlsxwriter.Workbook(OUTPUT_FILE_PATH)
 
@@ -365,11 +365,14 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
         pie2.set_size({"width": 420, "height": 300})
         sw.insert_chart(TOTAL_ROW + 2, 7, pie2)
 
-    # ── DATA SHEETS ───────────────────────────────────────────────────────────
-    # Uses .values bulk access instead of iterrows() — orders of magnitude
-    # faster on large sheets; no per-row Python object overhead.
+    # ── DATA SHEETS — only modules with incidents, only counted rows ─────────
+    # filtered_raw contains only the deduped rows that were counted.
+    # Sheets with zero incidents in range are excluded entirely.
     for name in sheet_names:
-        df      = processed_raw[name]
+        if counts[name] == 0:
+            continue                    # skip modules with no incidents in range
+
+        df      = filtered_raw[name]   # only the counted rows
         ws_name = name[:31]
         dw      = wb.add_worksheet(ws_name)
 
@@ -447,10 +450,12 @@ def main():
 
     # Step 2 — process each sheet
     processed_raw = {}
-    counts        = {}     # {sheet_name: unique_incident_count}
+    filtered_raw  = {}   # only the counted rows per sheet
+    counts        = {}
     for name in sheet_names:
         raw_df, filtered_df = process_sheet(raw_sheets[name], start_dt, end_dt)
         processed_raw[name] = raw_df
+        filtered_raw[name]  = filtered_df
         counts[name]        = len(filtered_df)
         status = (f"{counts[name]} unique incident(s) in range"
                   if counts[name] else "no incidents in range")
@@ -463,7 +468,7 @@ def main():
 
     print(f"\n  Modules with incidents : {len(module_names)}")
     if skipped:
-        print(f"  Modules skipped (zero) : {skipped}  (sheets still written)")
+        print(f"  Modules excluded (zero): {skipped}  (not written to output)")
     print(f"  Grand total            : {grand_total}")
 
     # Step 3b — overall status breakdown across all modules, all data
@@ -471,7 +476,7 @@ def main():
 
     # Step 4 — write output
     build_workbook(module_names, module_counts, status_labels, status_counts,
-                   processed_raw, sheet_names, start_dt, end_dt)
+                   filtered_raw, counts, sheet_names, start_dt, end_dt)
 
     print(f"\n  Report saved -> {OUTPUT_FILE_PATH}")
     print("Done.\n")
