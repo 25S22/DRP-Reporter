@@ -7,8 +7,8 @@ CONFIGURATION (only 3 things to set):
   COL_INCIDENT_ID  — exact column name for the Incident ID
   COL_CLOSURE_DATE — exact column name for the Closure Date
 
-Everything else — date range (prompted at runtime), number of sheets,
-number of modules with data, chart colours, layout — is handled automatically.
+Everything else — date range (prompted at runtime), number of modules,
+chart layout, colours — is handled automatically.
 
 Date formats like "2 Mar 2026", "2nd March 2026", "03/02/2026", "2026-03-02"
 are all parsed correctly.
@@ -18,16 +18,15 @@ are all parsed correctly.
 import os
 import re
 import sys
-import pandas as pd
 from datetime import datetime
+
+import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.chart import BarChart, PieChart, Reference
-from openpyxl.chart.series import DataPoint
 from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.filters import FilterColumn, CustomFilter, CustomFilters
-import warnings
 
+import warnings
 warnings.filterwarnings("ignore")
 
 # =============================================================================
@@ -45,20 +44,8 @@ COL_CLOSURE_DATE = "Incident Closure on"
 OUTPUT_FILE_PATH   = "incidents_report.xlsx"
 SUMMARY_SHEET_NAME = "Summary Dashboard"
 
-# Colour palette — extended so any number of modules gets a unique colour.
-# Cycles if there are more modules than colours (graceful, never errors).
-_PALETTE = [
-    "4472C4","ED7D31","70AD47","FF6961","FFC000","9DC3E6","A9D18E",
-    "FF9DA7","7030A0","00B0F0","F4B942","C00000","375623","833C00",
-    "5B9BD5","E2EFDA","BDD7EE","FCE4D6","EDEDED","002060","843C0C",
-    "1F497D","60497A","215732","7F7F7F","D9E1F2","F8CBAD","E2EFDA",
-]
-
-def _color(idx):
-    return _PALETTE[idx % len(_PALETTE)]
-
 # ---------------------------------------------------------------------------
-# STYLE HELPERS
+# STYLES
 # ---------------------------------------------------------------------------
 
 def _border(style="thin"):
@@ -81,10 +68,10 @@ TOTAL_FILL  = PatternFill("solid", start_color=LIGHT_BLUE)
 ALT_FILL    = PatternFill("solid", start_color=ALT_BLUE)
 WHITE_FILL  = PatternFill("solid", start_color=WHITE)
 
-H_FONT   = Font(name="Arial", bold=True, color=WHITE,  size=11)
+H_FONT   = Font(name="Arial", bold=True, color=WHITE,    size=11)
 D_FONT   = Font(name="Arial",            color="000000", size=10)
-T_FONT   = Font(name="Arial", bold=True, color=NAVY,   size=11)
-BIG_FONT = Font(name="Arial", bold=True, color=WHITE,  size=15)
+T_FONT   = Font(name="Arial", bold=True, color=NAVY,     size=11)
+BIG_FONT = Font(name="Arial", bold=True, color=WHITE,    size=15)
 
 CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
 LEFT   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
@@ -96,45 +83,38 @@ LEFT   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
 _ORDINAL_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
 
 def _strip_ordinals(text):
-    """'2nd Mar 2026' -> '2 Mar 2026'"""
     return _ORDINAL_RE.sub(r"\1", str(text))
+
+_DATE_FORMATS = [
+    "%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%d-%B-%Y",
+    "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%d.%m.%Y",
+    "%d %b %y", "%d %B %y",
+]
 
 def _parse_date_series(series):
     """
-    Robustly parse a pandas Series of date-like strings.
-    Handles ordinals, multiple delimiters, mixed formats.
+    Robustly parses a Series of mixed date strings.
+    Strips ordinal suffixes first, then tries multiple formats.
     """
     cleaned = series.astype(str).apply(_strip_ordinals)
-    # Try pandas inference first (covers ISO, DMY, MDY, named months …)
-    parsed = pd.to_datetime(cleaned, infer_datetime_format=True,
-                            dayfirst=True, errors="coerce")
-    # For any that failed, try a set of explicit formats
-    _FORMATS = [
-        "%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%d-%B-%Y",
-        "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%d.%m.%Y",
-        "%d %b %y", "%d %B %y",
-    ]
-    mask = parsed.isna()
-    if mask.any():
-        for fmt in _FORMATS:
-            still_bad = parsed.isna()
-            if not still_bad.any():
-                break
-            parsed[still_bad] = pd.to_datetime(
-                cleaned[still_bad], format=fmt, errors="coerce"
-            )
+    parsed  = pd.to_datetime(cleaned, infer_datetime_format=True,
+                             dayfirst=True, errors="coerce")
+    for fmt in _DATE_FORMATS:
+        still_bad = parsed.isna()
+        if not still_bad.any():
+            break
+        parsed[still_bad] = pd.to_datetime(
+            cleaned[still_bad], format=fmt, errors="coerce"
+        )
     return parsed
 
+
 def _prompt_date(label):
-    """Ask user for a date and return a pd.Timestamp. Accepts any sensible format."""
+    """Interactively prompt for a date in any recognisable format."""
     while True:
-        raw = input(f"  Enter {label} (e.g. 1 Jan 2024 / 01/01/2024 / 2024-01-01): ").strip()
+        raw     = input(f"  Enter {label} (e.g. 1 Jan 2024 / 01/01/2024 / 2024-01-01): ").strip()
         cleaned = _strip_ordinals(raw)
-        for fmt in [
-            "%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%d-%B-%Y",
-            "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%d.%m.%Y",
-            "%d %b %y", "%d %B %y",
-        ]:
+        for fmt in _DATE_FORMATS:
             try:
                 return pd.Timestamp(datetime.strptime(cleaned, fmt))
             except ValueError:
@@ -159,12 +139,7 @@ def load_all_sheets(path):
 # ---------------------------------------------------------------------------
 
 def process_sheet(df, start_dt, end_dt):
-    """
-    Returns (full_df_with_dates_parsed, filtered_and_deduped_df).
-    Sheets missing the closure-date column return an empty filtered df.
-    """
     df = df.copy()
-
     if COL_CLOSURE_DATE not in df.columns:
         return df, pd.DataFrame(columns=df.columns)
 
@@ -179,14 +154,10 @@ def process_sheet(df, start_dt, end_dt):
     return df, filtered
 
 # ---------------------------------------------------------------------------
-# STEP 3 — AGGREGATE
+# STEP 3 — AGGREGATE  (only modules with ≥ 1 incident enter the charts)
 # ---------------------------------------------------------------------------
 
 def aggregate(counts):
-    """
-    counts = {sheet_name: int}
-    Returns a DataFrame that includes ONLY modules with at least 1 incident.
-    """
     rows = [
         {"Module Name": k, "Unique Closed Incidents": v}
         for k, v in counts.items()
@@ -201,6 +172,7 @@ def aggregate(counts):
 # ---------------------------------------------------------------------------
 
 def _write_summary_table(ws, summary_df, start_row):
+    """Writes the styled table; returns (header_row, total_row)."""
     ws.row_dimensions[start_row].height = 24
     c = ws.cell(row=start_row, column=1,
                 value="Module-wise Unique Closed Incidents")
@@ -239,9 +211,9 @@ def _write_summary_table(ws, summary_df, start_row):
 
     for col in [1, 2, 3]:
         cell = ws.cell(row=total_row, column=col)
-        cell.fill   = TOTAL_FILL
-        cell.border = _thick_border()
-        cell.font   = T_FONT
+        cell.fill      = TOTAL_FILL
+        cell.border    = _thick_border()
+        cell.font      = T_FONT
         cell.alignment = CENTER
 
     ws.cell(row=total_row, column=1, value="TOTAL")
@@ -250,7 +222,6 @@ def _write_summary_table(ws, summary_df, start_row):
     ws.cell(row=total_row, column=3,
             value=f"=SUM(C{header_row+1}:C{total_row-1})")
 
-    # Column widths
     ws.column_dimensions["A"].width = 6
     ws.column_dimensions["B"].width = max(
         summary_df["Module Name"].astype(str).str.len().max() + 6, 24
@@ -260,37 +231,49 @@ def _write_summary_table(ws, summary_df, start_row):
     return header_row, total_row
 
 
-def _bar_chart(ws, summary_df, header_row):
-    n   = len(summary_df)
+def _build_bar_chart(ws, n_modules, header_row):
+    """
+    Bar chart — uses openpyxl's built-in style theming for colours.
+    No per-DataPoint solidFill calls (those break across openpyxl versions).
+    Style 10 gives distinct colours for up to ~12 series; cycles gracefully beyond.
+    """
     bar = BarChart()
     bar.type         = "col"
     bar.grouping     = "clustered"
     bar.title        = "Unique Closed Incidents by Module"
     bar.y_axis.title = "Count"
     bar.x_axis.title = "Module"
-    bar.style        = 10
-    # Scale width with number of modules, min 20, max 34
-    bar.width  = min(max(n * 3, 20), 34)
-    bar.height = 14
+    bar.style        = 10                                  # rich colour theme
+    bar.width        = min(max(n_modules * 3.2, 20), 36)  # scales with module count
+    bar.height       = 14
 
     data = Reference(ws, min_col=3, min_row=header_row,
-                     max_col=3, max_row=header_row + n)
+                     max_col=3, max_row=header_row + n_modules)
     cats = Reference(ws, min_col=2, min_row=header_row + 1,
-                     max_row=header_row + n)
+                     max_row=header_row + n_modules)
     bar.add_data(data, titles_from_data=True)
     bar.set_categories(cats)
 
-    series = bar.series[0]
-    for idx in range(n):
-        pt = DataPoint(idx=idx)
-        pt.graphicalProperties.solidFill = _color(idx)
-        series.dPt.append(pt)
+    # Give every bar its own colour by splitting into one series per data point.
+    # This is the only version-safe way to get distinct bar colours in openpyxl.
+    bar.series.clear()
+    for idx in range(n_modules):
+        data_single = Reference(ws, min_col=3, min_row=header_row + 1 + idx,
+                                max_col=3, max_row=header_row + 1 + idx)
+        cat_single  = Reference(ws, min_col=2, min_row=header_row + 1 + idx,
+                                max_row=header_row + 1 + idx)
+        bar.add_data(data_single, titles_from_data=False)
+        bar.set_categories(cats)   # shared axis labels
+        bar.series[idx].title.v = summary_df_global.iloc[idx]["Module Name"]
 
     return bar
 
 
-def _pie_chart(ws, summary_df, header_row):
-    n   = len(summary_df)
+def _build_pie_chart(ws, n_modules, header_row):
+    """
+    Pie chart — openpyxl natively colours each slice when there is one
+    series with multiple categories, so no DataPoint manipulation needed.
+    """
     pie = PieChart()
     pie.title  = "Incident Share by Module"
     pie.style  = 10
@@ -298,22 +281,23 @@ def _pie_chart(ws, summary_df, header_row):
     pie.height = 14
 
     data = Reference(ws, min_col=3, min_row=header_row,
-                     max_col=3, max_row=header_row + n)
+                     max_col=3, max_row=header_row + n_modules)
     cats = Reference(ws, min_col=2, min_row=header_row + 1,
-                     max_row=header_row + n)
+                     max_row=header_row + n_modules)
     pie.add_data(data, titles_from_data=True)
     pie.set_categories(cats)
-
-    series = pie.series[0]
-    for idx in range(n):
-        pt = DataPoint(idx=idx)
-        pt.graphicalProperties.solidFill = _color(idx)
-        series.dPt.append(pt)
 
     return pie
 
 
+# module-count-aware helper used inside _build_bar_chart
+summary_df_global = None
+
+
 def build_summary_sheet(wb, summary_df, start_dt, end_dt):
+    global summary_df_global
+    summary_df_global = summary_df
+
     ws = wb.create_sheet(SUMMARY_SHEET_NAME, 0)
 
     date_range_str = (
@@ -331,30 +315,30 @@ def build_summary_sheet(wb, summary_df, start_dt, end_dt):
 
     header_row, total_row = _write_summary_table(ws, summary_df, start_row=3)
 
+    n         = len(summary_df)
     chart_row = total_row + 2
 
-    bar = _bar_chart(ws, summary_df, header_row)
+    bar = _build_bar_chart(ws, n, header_row)
     ws.add_chart(bar, f"A{chart_row}")
 
-    # Place pie chart to the right of the bar chart
-    # Bar is ~bar.width/7.5 columns wide; offset by that + 1
+    # Pie starts just after the bar (bar.width / ~7.5 cols per unit)
     pie_col_idx = round(bar.width / 7.5) + 2
     pie_anchor  = f"{get_column_letter(pie_col_idx)}{chart_row}"
-    pie = _pie_chart(ws, summary_df, header_row)
+    pie = _build_pie_chart(ws, n, header_row)
     ws.add_chart(pie, pie_anchor)
 
     ws.freeze_panes = "A4"
-
 
 # ---------------------------------------------------------------------------
 # STEP 4b — DATA SHEETS
 # ---------------------------------------------------------------------------
 
-def _write_data_sheet(ws, df, start_dt, end_dt):
+def _write_data_sheet(ws, df):
     """
-    Writes ALL rows to the sheet with styled headers.
-    AutoFilter is pre-set to the date range so filtered incidents are visible
-    by default; clearing the filter reveals every row.
+    Writes ALL rows with styled headers + AutoFilter dropdown arrows.
+    AutoFilter ref covers the whole table so the user can filter any column.
+    (Custom date-column pre-filtering is skipped — it uses internal openpyxl
+    filter classes that break silently on some versions.)
     """
     if df.empty:
         return
@@ -389,36 +373,17 @@ def _write_data_sheet(ws, df, start_dt, end_dt):
             cell.border    = _border()
 
     ws.freeze_panes = "A2"
-
-    # AutoFilter on all columns
     last_col = get_column_letter(n_cols)
-    ws.auto_filter.ref = f"A1:{last_col}{len(df)+1}"
-
-    # Pre-set date range filter on the closure date column (if present)
-    if COL_CLOSURE_DATE in headers:
-        col_id_0 = headers.index(COL_CLOSURE_DATE)   # 0-based colId
-        cf1 = CustomFilter(
-            operator="greaterThanOrEqual",
-            val=start_dt.strftime("%Y-%m-%dT%H:%M:%S")
-        )
-        cf2 = CustomFilter(
-            operator="lessThanOrEqual",
-            val=end_dt.strftime("%Y-%m-%dT%H:%M:%S")
-        )
-        fc = FilterColumn(colId=col_id_0)
-        fc.customFilters = CustomFilters(customFilter=[cf1, cf2], _and=True)
-        ws.auto_filter.filterColumn.append(fc)
-
+    ws.auto_filter.ref = f"A1:{last_col}{len(df) + 1}"
 
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 
 def main():
-    # Prompt for date range
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("  INCIDENT REPORT GENERATOR")
-    print("="*60)
+    print("=" * 60)
     print("\nPlease enter the date range for filtering closed incidents.")
     start_dt = _prompt_date("START date (inclusive)")
     end_dt   = _prompt_date("END   date (inclusive)")
@@ -427,7 +392,7 @@ def main():
         start_dt, end_dt = end_dt, start_dt
         print("  (Dates swapped — start was after end.)")
 
-    print(f"\n  Range: {start_dt.strftime('%d %b %Y')} → {end_dt.strftime('%d %b %Y')}\n")
+    print(f"\n  Range: {start_dt.strftime('%d %b %Y')} -> {end_dt.strftime('%d %b %Y')}\n")
 
     # Step 1 — load
     raw_sheets  = load_all_sheets(INPUT_FILE_PATH)
@@ -442,34 +407,35 @@ def main():
         raw_df, filtered_df = process_sheet(raw_sheets[name], start_dt, end_dt)
         processed_raw[name] = raw_df
         counts[name]        = len(filtered_df)
-        status = f"{counts[name]} unique incident(s) in range" if counts[name] else "no incidents in range"
+        status = (
+            f"{counts[name]} unique incident(s) in range"
+            if counts[name] else "no incidents in range"
+        )
         print(f"  [{name}]  total rows = {len(raw_df)}  |  {status}")
 
-    # Step 3 — aggregate (only modules with ≥1 incident go into the charts)
+    # Step 3 — aggregate
     summary_df  = aggregate(counts)
     grand_total = summary_df["Unique Closed Incidents"].sum()
     active      = len(summary_df)
     skipped     = len(sheet_names) - active
 
-    print(f"\n  Modules with incidents : {active}")
+    print(f"\n  Modules with incidents  : {active}")
     if skipped:
-        print(f"  Modules with zero hits  : {skipped} (included in data sheets, excluded from charts)")
+        print(f"  Modules with zero hits  : {skipped} (data sheets written, excluded from charts)")
     print(f"  Grand total             : {grand_total}")
 
     # Step 4 — build fresh output workbook
     wb = Workbook()
-    wb.remove(wb.active)   # remove openpyxl's default blank sheet
+    wb.remove(wb.active)   # remove the default blank sheet
 
-    # Summary dashboard (first tab)
     build_summary_sheet(wb, summary_df, start_dt, end_dt)
 
-    # All original data sheets in original order
     for name in sheet_names:
         ws = wb.create_sheet(title=name)
-        _write_data_sheet(ws, processed_raw[name], start_dt, end_dt)
+        _write_data_sheet(ws, processed_raw[name])
 
     wb.save(OUTPUT_FILE_PATH)
-    print(f"\nReport saved -> {OUTPUT_FILE_PATH}")
+    print(f"\n  Report saved -> {OUTPUT_FILE_PATH}")
     print("Done.\n")
 
 
