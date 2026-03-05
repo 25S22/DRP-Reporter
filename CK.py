@@ -2,12 +2,19 @@
 =============================================================================
 INCIDENT REPORT GENERATOR
 =============================================================================
-CONFIGURATION — only 3 things to set:
+CONFIGURATION — only 4 things to set:
   INPUT_FILE_PATH  : path to the source Excel workbook
   COL_INCIDENT_ID  : exact column name for the Incident ID
   COL_CLOSURE_DATE : exact column name for the Closure Date
+  COL_STATUS       : exact column name for the Status column
 
 Everything else is automatic — date range is prompted at runtime.
+
+Summary sheet contains:
+  1. Module-wise unique closed incidents table (date range filtered)
+  2. Pie chart — "Closed Incidents By Module" (date range filtered)
+  3. Pie chart — "Overall Incident Status" (all data, all modules,
+     unique by Incident ID; Closed variants grouped as one slice)
 =============================================================================
 """
 
@@ -22,12 +29,13 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # =============================================================================
-# >>>  CONFIGURATION — only edit these three lines  <<<
+# >>>  CONFIGURATION — only edit these four lines  <<<
 # =============================================================================
 
 INPUT_FILE_PATH  = "incidents.xlsx"
 COL_INCIDENT_ID  = "Incident Id"
 COL_CLOSURE_DATE = "Incident Closure on"
+COL_STATUS       = "Status"
 
 # =============================================================================
 # INTERNALS
@@ -122,11 +130,79 @@ def aggregate(counts):
     return module_names, module_counts
 
 # ---------------------------------------------------------------------------
+# STEP 3b — OVERALL STATUS BREAKDOWN  (all data, unique incident IDs)
+# ---------------------------------------------------------------------------
+
+def _normalize_status(val):
+    """
+    Maps raw status strings to three display buckets:
+      - anything starting with 'closed' (case-insensitive) -> 'Closed'
+      - anything starting with 'open'                      -> 'Open'
+      - anything starting with 'in progress' / 'inprogress'-> 'In Progress'
+      - everything else kept as-is so nothing is silently dropped
+    """
+    if pd.isna(val):
+        return "Unknown"
+    s = str(val).strip().lower()
+    if s.startswith("closed"):
+        return "Closed"
+    if s.startswith("open"):
+        return "Open"
+    if s.startswith("in progress") or s.startswith("inprogress"):
+        return "In Progress"
+    return str(val).strip()   # keep original casing for unknowns
+
+def compute_status_breakdown(processed_raw, sheet_names):
+    """
+    Combine every sheet, deduplicate globally on COL_INCIDENT_ID,
+    then count unique incidents per normalised status bucket.
+    Returns two plain lists: status_labels, status_counts.
+    """
+    frames = []
+    for name in sheet_names:
+        df = processed_raw[name]
+        if df.empty:
+            continue
+        cols_needed = [c for c in [COL_INCIDENT_ID, COL_STATUS] if c in df.columns]
+        if cols_needed:
+            frames.append(df[cols_needed].copy())
+
+    if not frames:
+        return [], []
+
+    combined = pd.concat(frames, ignore_index=True)
+
+    # Global dedup — one row per unique incident ID
+    if COL_INCIDENT_ID in combined.columns:
+        combined = combined.drop_duplicates(subset=[COL_INCIDENT_ID])
+
+    if COL_STATUS not in combined.columns:
+        print(f"  WARNING: Column '{COL_STATUS}' not found — status pie skipped.")
+        return [], []
+
+    combined["_status_norm"] = combined[COL_STATUS].apply(_normalize_status)
+    counts = combined["_status_norm"].value_counts()
+
+    # Preferred display order; anything else appended alphabetically
+    order = ["Open", "In Progress", "Closed"]
+    labels = [s for s in order if s in counts.index]
+    labels += sorted([s for s in counts.index if s not in order])
+
+    status_labels  = labels
+    status_counts  = [int(counts[s]) for s in labels]
+
+    print(f"\n  Overall status breakdown (unique incidents across all modules):")
+    for lbl, cnt in zip(status_labels, status_counts):
+        print(f"    {lbl}: {cnt}")
+
+    return status_labels, status_counts
+
+# ---------------------------------------------------------------------------
 # STEP 4 — BUILD OUTPUT WORKBOOK
 # ---------------------------------------------------------------------------
 
-def build_workbook(module_names, module_counts, processed_raw,
-                   sheet_names, start_dt, end_dt):
+def build_workbook(module_names, module_counts, status_labels, status_counts,
+                   processed_raw, sheet_names, start_dt, end_dt):
 
     wb = xlsxwriter.Workbook(OUTPUT_FILE_PATH)
 
@@ -255,34 +331,47 @@ def build_workbook(module_names, module_counts, processed_raw,
     sw.set_column(2, 2, 28)
     sw.freeze_panes(HDR_ROW, 0)
 
-    # ── BAR CHART ─────────────────────────────────────────────────────────────
-    bar = wb.add_chart({"type": "column"})
-    bar.add_series({
-        "name":       "Incidents",
+    # ── PIE 1 — Closed Incidents By Module (date range filtered) ─────────────
+    pie1 = wb.add_chart({"type": "pie"})
+    pie1.add_series({
+        "name":       "Closed Incidents By Module",
         "categories": [SUMMARY_SHEET_NAME, DATA_START, 1, DATA_START + n - 1, 1],
         "values":     [SUMMARY_SHEET_NAME, DATA_START, 2, DATA_START + n - 1, 2],
-        "gap":        80,
     })
-    bar.set_title({"name": "Unique Closed Incidents by Module"})
-    bar.set_x_axis({"name": "Module"})
-    bar.set_y_axis({"name": "Count"})
-    bar.set_style(10)
-    bar_w = min(max(n * 90, 400), 720)
-    bar.set_size({"width": bar_w, "height": 300})
-    sw.insert_chart(TOTAL_ROW + 2, 0, bar)
+    pie1.set_title({"name": "Closed Incidents By Module"})
+    pie1.set_style(10)
+    pie1.set_size({"width": 420, "height": 300})
+    sw.insert_chart(TOTAL_ROW + 2, 0, pie1)
 
-    # ── PIE CHART ─────────────────────────────────────────────────────────────
-    pie = wb.add_chart({"type": "pie"})
-    pie.add_series({
-        "name":       "Incidents",
-        "categories": [SUMMARY_SHEET_NAME, DATA_START, 1, DATA_START + n - 1, 1],
-        "values":     [SUMMARY_SHEET_NAME, DATA_START, 2, DATA_START + n - 1, 2],
-    })
-    pie.set_title({"name": "Incident Share by Module"})
-    pie.set_style(10)
-    pie.set_size({"width": 420, "height": 300})
-    pie_col = round(bar_w / 64) + 1
-    sw.insert_chart(TOTAL_ROW + 2, pie_col, pie)
+    # ── STATUS DATA — written to hidden columns (E, F) for pie2 reference ────
+    #
+    # xlsxwriter charts must reference cells in the workbook.
+    # We write status labels + counts to cols 4,5 (E,F) starting at STATUS_ROW
+    # then hide those columns so the sheet stays clean.
+    #
+    STATUS_ROW = TOTAL_ROW + 2   # same row band as charts, off to the side
+    ns = len(status_labels)
+
+    if ns > 0:
+        for i, (lbl, cnt) in enumerate(zip(status_labels, status_counts)):
+            sw.write(STATUS_ROW + i, 4, lbl)   # col E
+            sw.write(STATUS_ROW + i, 5, cnt)   # col F
+
+        sw.set_column(4, 5, None, None, {"hidden": True})
+
+        # ── PIE 2 — Overall Incident Status (all data, unique IDs) ───────────
+        pie2 = wb.add_chart({"type": "pie"})
+        pie2.add_series({
+            "name":       "Overall Incident Status",
+            "categories": [SUMMARY_SHEET_NAME, STATUS_ROW, 4,
+                           STATUS_ROW + ns - 1, 4],
+            "values":     [SUMMARY_SHEET_NAME, STATUS_ROW, 5,
+                           STATUS_ROW + ns - 1, 5],
+        })
+        pie2.set_title({"name": "Overall Incident Status (All Modules, Unique IDs)"})
+        pie2.set_style(10)
+        pie2.set_size({"width": 420, "height": 300})
+        sw.insert_chart(TOTAL_ROW + 2, 7, pie2)
 
     # ── DATA SHEETS ───────────────────────────────────────────────────────────
     for name in sheet_names:
@@ -377,8 +466,11 @@ def main():
         print(f"  Modules skipped (zero) : {skipped}  (sheets still written)")
     print(f"  Grand total            : {grand_total}")
 
+    # Step 3b — overall status breakdown across all modules, all data
+    status_labels, status_counts = compute_status_breakdown(processed_raw, sheet_names)
+
     # Step 4 — write output
-    build_workbook(module_names, module_counts,
+    build_workbook(module_names, module_counts, status_labels, status_counts,
                    processed_raw, sheet_names, start_dt, end_dt)
 
     print(f"\n  Report saved -> {OUTPUT_FILE_PATH}")
