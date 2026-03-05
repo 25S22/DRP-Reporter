@@ -135,14 +135,14 @@ def aggregate(counts):
 
 def _normalize_status(val):
     """
-    Maps raw status strings to three display buckets:
-      - anything starting with 'closed' (case-insensitive) -> 'Closed'
+    Maps raw status to exactly one of three buckets, or None to discard.
+      - anything starting with 'closed'                    -> 'Closed'
       - anything starting with 'open'                      -> 'Open'
-      - anything starting with 'in progress' / 'inprogress'-> 'In Progress'
-      - everything else kept as-is so nothing is silently dropped
+      - anything starting with 'in progress'/'inprogress'  -> 'In Progress'
+      - everything else (Reopen, Unknown, blank, etc.)     -> None (excluded)
     """
     if pd.isna(val):
-        return "Unknown"
+        return None
     s = str(val).strip().lower()
     if s.startswith("closed"):
         return "Closed"
@@ -150,13 +150,13 @@ def _normalize_status(val):
         return "Open"
     if s.startswith("in progress") or s.startswith("inprogress"):
         return "In Progress"
-    return str(val).strip()   # keep original casing for unknowns
+    return None   # discard Reopen, Unknown, or anything else
 
 def compute_status_breakdown(processed_raw, sheet_names):
     """
     Combine every sheet, deduplicate globally on COL_INCIDENT_ID,
-    then count unique incidents per normalised status bucket.
-    Returns two plain lists: status_labels, status_counts.
+    normalise status, discard anything outside the three buckets,
+    and return plain lists in fixed display order: Open, In Progress, Closed.
     """
     frames = []
     for name in sheet_names:
@@ -172,7 +172,6 @@ def compute_status_breakdown(processed_raw, sheet_names):
 
     combined = pd.concat(frames, ignore_index=True)
 
-    # Global dedup — one row per unique incident ID
     if COL_INCIDENT_ID in combined.columns:
         combined = combined.drop_duplicates(subset=[COL_INCIDENT_ID])
 
@@ -181,21 +180,22 @@ def compute_status_breakdown(processed_raw, sheet_names):
         return [], []
 
     combined["_status_norm"] = combined[COL_STATUS].apply(_normalize_status)
+
+    # Drop everything that didn't map to one of the three buckets
+    combined = combined[combined["_status_norm"].notna()]
+
     counts = combined["_status_norm"].value_counts()
 
-    # Preferred display order; anything else appended alphabetically
-    order = ["Open", "In Progress", "Closed"]
+    # Fixed order — only include buckets that actually have data
+    order  = ["Open", "In Progress", "Closed"]
     labels = [s for s in order if s in counts.index]
-    labels += sorted([s for s in counts.index if s not in order])
+    status_counts = [int(counts[s]) for s in labels]
 
-    status_labels  = labels
-    status_counts  = [int(counts[s]) for s in labels]
-
-    print(f"\n  Overall status breakdown (unique incidents across all modules):")
-    for lbl, cnt in zip(status_labels, status_counts):
+    print(f"\n  Overall status breakdown (unique incidents, 3 buckets only):")
+    for lbl, cnt in zip(labels, status_counts):
         print(f"    {lbl}: {cnt}")
 
-    return status_labels, status_counts
+    return labels, status_counts
 
 # ---------------------------------------------------------------------------
 # STEP 4 — BUILD OUTPUT WORKBOOK
@@ -343,30 +343,22 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
     pie1.set_size({"width": 420, "height": 300})
     sw.insert_chart(TOTAL_ROW + 2, 0, pie1)
 
-    # ── STATUS DATA — written to hidden columns (E, F) for pie2 reference ────
-    #
-    # xlsxwriter charts must reference cells in the workbook.
-    # We write status labels + counts to cols 4,5 (E,F) starting at STATUS_ROW
-    # then hide those columns so the sheet stays clean.
-    #
-    STATUS_ROW = TOTAL_ROW + 2   # same row band as charts, off to the side
+    # ── PIE 2 — Overall Incident Status (all data, unique IDs) ───────────────
+    # Status data is written to a dedicated hidden sheet so Excel fully renders
+    # the chart. Hiding the *columns* that a chart references blanks it out.
     ns = len(status_labels)
-
     if ns > 0:
+        STATUS_SHEET = "Status Data"
+        ss = wb.add_worksheet(STATUS_SHEET)
         for i, (lbl, cnt) in enumerate(zip(status_labels, status_counts)):
-            sw.write(STATUS_ROW + i, 4, lbl)   # col E
-            sw.write(STATUS_ROW + i, 5, cnt)   # col F
+            ss.write(i, 0, lbl)
+            ss.write(i, 1, cnt)
 
-        sw.set_column(4, 5, None, None, {"hidden": True})
-
-        # ── PIE 2 — Overall Incident Status (all data, unique IDs) ───────────
         pie2 = wb.add_chart({"type": "pie"})
         pie2.add_series({
             "name":       "Overall Incident Status",
-            "categories": [SUMMARY_SHEET_NAME, STATUS_ROW, 4,
-                           STATUS_ROW + ns - 1, 4],
-            "values":     [SUMMARY_SHEET_NAME, STATUS_ROW, 5,
-                           STATUS_ROW + ns - 1, 5],
+            "categories": [STATUS_SHEET, 0, 0, ns - 1, 0],
+            "values":     [STATUS_SHEET, 0, 1, ns - 1, 1],
         })
         pie2.set_title({"name": "Overall Incident Status (All Modules, Unique IDs)"})
         pie2.set_style(10)
@@ -374,46 +366,54 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
         sw.insert_chart(TOTAL_ROW + 2, 7, pie2)
 
     # ── DATA SHEETS ───────────────────────────────────────────────────────────
+    # Uses .values bulk access instead of iterrows() — orders of magnitude
+    # faster on large sheets; no per-row Python object overhead.
     for name in sheet_names:
-        df       = processed_raw[name]
-        ws_name  = name[:31]          # Excel sheet name max 31 chars
-        dw       = wb.add_worksheet(ws_name)
+        df      = processed_raw[name]
+        ws_name = name[:31]
+        dw      = wb.add_worksheet(ws_name)
 
         if df.empty:
             continue
 
-        headers = list(df.columns)
-        n_cols  = len(headers)
-        n_rows  = len(df)
+        headers      = list(df.columns)
+        n_cols       = len(headers)
+        n_rows       = len(df)
+        date_col_idx = headers.index(COL_CLOSURE_DATE) if COL_CLOSURE_DATE in headers else -1
 
-        # Header
+        # Default row height set once — no per-row XML tag written
+        dw.set_default_row(16)
+
+        # Header row
         dw.set_row(0, 20)
         for ci, h in enumerate(headers):
             dw.write(0, ci, h, f_data_hdr)
             dw.set_column(ci, ci, max(len(str(h)) + 4, 14))
 
-        # Data — iterate with iterrows() so column access by name is safe
-        for ri, (_, row) in enumerate(df.iterrows(), 1):
-            dw.set_row(ri, 16)
-            alt = (ri % 2 == 0)
-            for ci, col_name in enumerate(headers):
-                val          = row[col_name]
-                is_date_col  = (col_name == COL_CLOSURE_DATE)
+        # Bulk value extraction — one numpy/Python pass over the whole frame
+        data_values = df.values
+
+        for ri in range(n_rows):
+            excel_row = ri + 1
+            alt = (excel_row % 2 == 0)
+            for ci in range(n_cols):
+                val         = data_values[ri, ci]
+                is_date_col = (ci == date_col_idx)
                 try:
                     is_null = pd.isna(val)
                 except (TypeError, ValueError):
                     is_null = False
 
                 if is_null:
-                    dw.write_blank(ri, ci, None,
+                    dw.write_blank(excel_row, ci, None,
                                    f_date_alt if (is_date_col and alt) else
                                    f_date     if is_date_col else
                                    f_cell_alt if alt else f_cell)
                 elif isinstance(val, pd.Timestamp):
-                    dw.write_datetime(ri, ci, val.to_pydatetime(),
+                    dw.write_datetime(excel_row, ci, val.to_pydatetime(),
                                       f_date_alt if alt else f_date)
                 else:
-                    dw.write(ri, ci, val,
+                    dw.write(excel_row, ci, val,
                              f_cell_alt if alt else f_cell)
 
         dw.freeze_panes(1, 0)
