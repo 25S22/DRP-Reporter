@@ -101,7 +101,15 @@ def process_sheet(df, start_dt, end_dt):
     df = df.copy()
     if COL_CLOSURE_DATE not in df.columns:
         return df, pd.DataFrame(columns=df.columns)
+
     df[COL_CLOSURE_DATE] = _parse_date_series(df[COL_CLOSURE_DATE])
+
+    # Diagnostic — expose any rows where date failed to parse
+    nat_mask = df[COL_CLOSURE_DATE].isna()
+    if nat_mask.any():
+        # Only flag rows that had a non-blank original value (blank dates are expected)
+        pass  # printed per-sheet in main for visibility
+
     mask     = (df[COL_CLOSURE_DATE] >= start_dt) & (df[COL_CLOSURE_DATE] <= end_dt)
     filtered = df[mask].copy()
     if COL_INCIDENT_ID in filtered.columns:
@@ -464,7 +472,7 @@ def main():
 
     # Step 2 — process each sheet
     processed_raw = {}
-    filtered_raw  = {}   # only the counted rows per sheet
+    filtered_raw  = {}
     counts        = {}
     for name in sheet_names:
         raw_df, filtered_df = process_sheet(raw_sheets[name], start_dt, end_dt)
@@ -474,6 +482,24 @@ def main():
         status = (f"{counts[name]} unique incident(s) in range"
                   if counts[name] else "no incidents in range")
         print(f"  [{name}]  total rows = {len(raw_df)}  |  {status}")
+
+        # ── Diagnostic: show rows where closure date failed to parse ──────────
+        if COL_CLOSURE_DATE in raw_df.columns:
+            # Re-read original strings before parsing to show what failed
+            orig_strings = raw_sheets[name][COL_CLOSURE_DATE].astype(str).str.strip()
+            nat_rows     = raw_df[raw_df[COL_CLOSURE_DATE].isna()]
+            # Only flag rows that had a non-empty value originally
+            truly_bad    = nat_rows[
+                orig_strings.loc[nat_rows.index].str.lower().isin(
+                    ["", "nan", "none", "nat", "n/a", "-"]
+                ) == False
+            ]
+            if not truly_bad.empty:
+                samples = orig_strings.loc[truly_bad.index].unique()[:5]
+                print(f"    ⚠  {len(truly_bad)} row(s) had unparseable closure dates "
+                      f"— excluded from count!")
+                print(f"    ⚠  Sample date strings that failed: "
+                      f"{list(samples)}")
 
     # Step 3 — aggregate into plain lists (no DataFrame column-name ambiguity)
     module_names, module_counts = aggregate(counts)
