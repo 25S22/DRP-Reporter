@@ -59,15 +59,39 @@ def _strip_ordinals(text):
     return _ORDINAL_RE.sub(r"\1", str(text))
 
 def _parse_date_series(series):
+    """
+    Robustly parse a Series into datetime.
+    Handles: named months, ordinals, dd/mm/yyyy, ISO, and Excel numeric serials
+    (float strings like '45353.0' that appear when cells are forced to dtype=str).
+    """
+    # Pass 1: pandas inference
     cleaned = series.astype(str).apply(_strip_ordinals)
     parsed  = pd.to_datetime(cleaned, infer_datetime_format=True,
                              dayfirst=True, errors="coerce")
+
+    # Pass 2: explicit format list
     for fmt in _DATE_FORMATS:
         if not parsed.isna().any():
             break
         bad = parsed.isna()
         parsed[bad] = pd.to_datetime(cleaned[bad], format=fmt, errors="coerce")
+
+    # Pass 3: Excel numeric serial fallback
+    # dtype=str turns Excel date serials into strings like "45353.0"
+    # Excel epoch is 1899-12-30 (pandas convention)
+    _EPOCH = pd.Timestamp("1899-12-30")
+    still_bad = parsed.isna()
+    if still_bad.any():
+        for idx in parsed.index[still_bad]:
+            try:
+                serial = float(str(series[idx]).strip())
+                if 1 < serial < 2958466:   # valid Excel date range 1900–9999
+                    parsed[idx] = _EPOCH + pd.Timedelta(days=serial)
+            except (ValueError, TypeError):
+                pass
+
     return parsed
+
 
 def _prompt_date(label):
     while True:
@@ -91,7 +115,21 @@ def load_all_sheets(path):
     if not os.path.exists(path):
         sys.exit(f"\nERROR: Input file not found -> {path}\n")
     print(f"\nLoading: {path}")
-    return pd.read_excel(path, sheet_name=None, dtype=str)
+
+    # Load twice:
+    #   str version   — keeps IDs, Status, all text columns exactly as-is
+    #   native version — lets pandas parse the date column properly (no serial conversion)
+    # Then splice: replace only the date column with the natively-parsed version.
+    str_sheets    = pd.read_excel(path, sheet_name=None, dtype=str)
+    native_sheets = pd.read_excel(path, sheet_name=None)
+
+    merged = {}
+    for name, df_str in str_sheets.items():
+        df = df_str.copy()
+        if name in native_sheets and COL_CLOSURE_DATE in native_sheets[name].columns:
+            df[COL_CLOSURE_DATE] = native_sheets[name][COL_CLOSURE_DATE].values
+        merged[name] = df
+    return merged
 
 # ---------------------------------------------------------------------------
 # STEP 2 — PROCESS
