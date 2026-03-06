@@ -346,17 +346,19 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
         "categories": [SUMMARY_SHEET_NAME, DATA_START, 1, DATA_START + n - 1, 1],
         "values":     [SUMMARY_SHEET_NAME, DATA_START, 2, DATA_START + n - 1, 2],
         "data_labels": {
-            "category":   True,    # module name
-            "value":      True,    # raw count
-            "percentage": True,    # % of total
-            "separator":  "\n",    # each on its own line
-            "font":       {"bold": True, "size": 9},
+            "category":   True,
+            "value":      True,
+            "percentage": True,
+            "separator":  "\n",
+            "font":       {"bold": True, "size": 10, "color": "#FFFFFF"},
+            "border":     {"none": True},
+            "fill":       {"none": True},
         },
     })
     pie1.set_title({"name": "Closed Incidents By Module"})
     pie1.set_legend({"position": "bottom"})
     pie1.set_style(10)
-    pie1.set_size({"width": 480, "height": 340})
+    pie1.set_size({"width": 480, "height": 360})
     sw.insert_chart(TOTAL_ROW + 2, 0, pie1)
 
     # ── PIE 2 — Overall Incident Status (all data, unique IDs) ───────────────
@@ -378,13 +380,15 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
                 "value":      True,
                 "percentage": True,
                 "separator":  "\n",
-                "font":       {"bold": True, "size": 9},
+                "font":       {"bold": True, "size": 10, "color": "#FFFFFF"},
+                "border":     {"none": True},
+                "fill":       {"none": True},
             },
         })
         pie2.set_title({"name": "Overall Incident Status (All Modules, Unique IDs)"})
         pie2.set_legend({"position": "bottom"})
         pie2.set_style(10)
-        pie2.set_size({"width": 480, "height": 340})
+        pie2.set_size({"width": 480, "height": 360})
         sw.insert_chart(TOTAL_ROW + 2, 7, pie2)
 
     # ── DATA SHEETS — only modules with incidents, only counted rows ─────────
