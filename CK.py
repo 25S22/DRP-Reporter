@@ -526,6 +526,11 @@ def main():
         start_dt, end_dt = end_dt, start_dt
         print("  (Dates swapped — start was after end.)")
 
+    # Push end_dt to end of day so incidents closed at any time on that date
+    # are included. Without this, "06 Mar 2026" becomes 00:00:00 and anything
+    # closed at 10:30am on Mar 6 would fail the <= check.
+    end_dt = end_dt.replace(hour=23, minute=59, second=59)
+
     print(f"\n  Range: {start_dt.strftime('%d %b %Y')} -> {end_dt.strftime('%d %b %Y')}\n")
 
     # Step 1 — load
@@ -537,6 +542,32 @@ def main():
     processed_raw = {}
     filtered_raw  = {}
     counts        = {}
+
+    # ── DIAGNOSTIC ────────────────────────────────────────────────────────────
+    print("\n  DIAGNOSTIC — checking for closed incidents with missing closure dates:")
+    for name in sheet_names:
+        df = raw_sheets[name] if name in raw_sheets else pd.DataFrame()
+        if df.empty or COL_INCIDENT_ID not in df.columns:
+            continue
+        has_status  = COL_STATUS in df.columns
+        has_cl_date = COL_CLOSURE_DATE in df.columns
+        if not has_status or not has_cl_date:
+            continue
+        closed_mask  = df[COL_STATUS].astype(str).str.lower().str.startswith("closed")
+        closed_df    = df[closed_mask]
+        blank_date   = closed_df[
+            closed_df[COL_CLOSURE_DATE].astype(str).str.strip().isin(
+                ["", "nan", "NaT", "None", "N/A", "-"]
+            )
+        ]
+        if not blank_date.empty:
+            print(f"    [{name}]  {len(blank_date)} closed incident(s) have NO closure date "
+                  f"— these will never appear in module tally!")
+        else:
+            print(f"    [{name}]  all closed incidents have a closure date  ✓")
+    print()
+    # ── END DIAGNOSTIC ────────────────────────────────────────────────────────
+
     for name in sheet_names:
         raw_df, filtered_df = process_sheet(raw_sheets[name], start_dt, end_dt)
         processed_raw[name] = raw_df
