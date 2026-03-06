@@ -50,6 +50,15 @@ SUMMARY_SHEET_NAME = "Summary Dashboard"
 
 _ORDINAL_RE   = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
 _DATE_FORMATS = [
+    # ── with comma after month name (e.g. "18 Feb, 2026 06:11:54 pm") ────────
+    "%d %b, %Y %I:%M:%S %p",   # 18 Feb, 2026 06:11:54 pm
+    "%d %B, %Y %I:%M:%S %p",   # 18 February, 2026 06:11:54 pm
+    "%d %b, %Y %H:%M:%S",      # 18 Feb, 2026 18:11:54
+    "%d %B, %Y %H:%M:%S",
+    "%d %b, %Y %I:%M %p",      # 18 Feb, 2026 06:11 pm
+    "%d %b, %Y",                # 18 Feb, 2026
+    "%d %B, %Y",                # 18 February, 2026
+    # ── standard formats ──────────────────────────────────────────────────────
     "%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%d-%B-%Y",
     "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%d.%m.%Y",
     "%d %b %y", "%d %B %y",
@@ -61,15 +70,29 @@ def _strip_ordinals(text):
 def _parse_date_series(series):
     """
     Robustly parse a Series into datetime.
-    Handles: named months, ordinals, dd/mm/yyyy, ISO, and Excel numeric serials
-    (float strings like '45353.0' that appear when cells are forced to dtype=str).
+    Handles ordinals, comma-after-month ("18 Feb, 2026 06:11:54 pm"),
+    standard formats, and Excel numeric serials.
     """
-    # Pass 1: pandas inference
-    cleaned = series.astype(str).apply(_strip_ordinals)
-    parsed  = pd.to_datetime(cleaned, infer_datetime_format=True,
-                             dayfirst=True, errors="coerce")
+    # Normalise: strip ordinals AND the comma that appears after month names
+    # e.g. "18 Feb, 2026" -> "18 Feb 2026"
+    def _clean(text):
+        t = _strip_ordinals(str(text))
+        t = re.sub(r"(%s),\s*" % "|".join([
+            "Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec",
+            "January","February","March","April","May","June","July","August",
+            "September","October","November","December",
+        ]), lambda m: m.group(0).replace(",", " "), t, flags=re.IGNORECASE)
+        # simpler: just remove any comma that follows a letter (month names only)
+        t = re.sub(r"([A-Za-z]),", r"\1", t)
+        return t.strip()
 
-    # Pass 2: explicit format list
+    cleaned = series.astype(str).apply(_clean)
+
+    # Pass 1: pandas inference
+    parsed = pd.to_datetime(cleaned, infer_datetime_format=True,
+                            dayfirst=True, errors="coerce")
+
+    # Pass 2: explicit format list (already comma-stripped so formats match)
     for fmt in _DATE_FORMATS:
         if not parsed.isna().any():
             break
@@ -77,15 +100,13 @@ def _parse_date_series(series):
         parsed[bad] = pd.to_datetime(cleaned[bad], format=fmt, errors="coerce")
 
     # Pass 3: Excel numeric serial fallback
-    # dtype=str turns Excel date serials into strings like "45353.0"
-    # Excel epoch is 1899-12-30 (pandas convention)
-    _EPOCH = pd.Timestamp("1899-12-30")
+    _EPOCH    = pd.Timestamp("1899-12-30")
     still_bad = parsed.isna()
     if still_bad.any():
         for idx in parsed.index[still_bad]:
             try:
                 serial = float(str(series[idx]).strip())
-                if 1 < serial < 2958466:   # valid Excel date range 1900–9999
+                if 1 < serial < 2958466:
                     parsed[idx] = _EPOCH + pd.Timedelta(days=serial)
             except (ValueError, TypeError):
                 pass
