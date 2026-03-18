@@ -454,34 +454,95 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
     sw.set_column(2, 2, 28)
     sw.freeze_panes(HDR_ROW, 0)
 
-    # Shared data_labels config — labels printed OUTSIDE the slice with leader
-    # lines. "outside_end" position + navy bold text = clean, never overlaps slices.
-    _LABELS = {
-        "category":   True,
-        "value":      True,
-        "percentage": True,
-        "separator":  "\n",
-        "position":   "outside_end",
-        "font":       {"bold": True, "size": 9, "color": "#1F3864"},
-        "border":     {"none": True},
-        "fill":       {"none": True},
-    }
+    # ── PIE COLOUR PALETTE ───────────────────────────────────────────────────
+    # Defined explicitly so the legend swatches match slice colours exactly.
+    _PALETTE = [
+        "#4472C4", "#ED7D31", "#70AD47", "#FFC000", "#5B9BD5",
+        "#A9D18E", "#FF7C80", "#9E480E", "#7030A0", "#636363",
+        "#255E91", "#43682B", "#C00000", "#997300", "#7B5EA7",
+    ]
 
-    # ── PIE 1 — Closed Incidents By Module (date range filtered) ─────────────
+    def _pie_points(count):
+        return [{"fill": {"color": _PALETTE[i % len(_PALETTE)]}}
+                for i in range(count)]
+
+    def _write_legend(ws, start_row, start_col, labels, values):
+        """
+        Writes a colour-swatch legend table:
+          [■] | Name | Count | Percentage
+        Each row gets the matching slice colour as a filled swatch cell.
+        """
+        total = sum(values) or 1
+        # Header row
+        hdr_fmt = wb.add_format({
+            "bold": True, "font_name": "Arial", "font_size": 9,
+            "font_color": WHITE, "bg_color": NAVY,
+            "align": "center", "valign": "vcenter", "border": 1,
+        })
+        ws.write(start_row, start_col,     "",          hdr_fmt)
+        ws.write(start_row, start_col + 1, "Name",      hdr_fmt)
+        ws.write(start_row, start_col + 2, "Count",     hdr_fmt)
+        ws.write(start_row, start_col + 3, "% Share",   hdr_fmt)
+
+        for i, (lbl, val) in enumerate(zip(labels, values)):
+            r      = start_row + 1 + i
+            colour = _PALETTE[i % len(_PALETTE)]
+            alt    = (i % 2 == 1)
+            bg     = ALT if alt else WHITE
+
+            swatch_fmt = wb.add_format({
+                "bg_color": colour, "border": 1,
+            })
+            name_fmt = wb.add_format({
+                "font_name": "Arial", "font_size": 9, "border": 1,
+                "align": "left", "valign": "vcenter", "bg_color": bg,
+            })
+            val_fmt = wb.add_format({
+                "font_name": "Arial", "font_size": 9, "border": 1,
+                "align": "center", "valign": "vcenter", "bg_color": bg,
+            })
+            pct_fmt = wb.add_format({
+                "font_name": "Arial", "font_size": 9, "border": 1,
+                "align": "center", "valign": "vcenter", "bg_color": bg,
+                "num_format": "0.0%",
+            })
+
+            ws.write(r, start_col,     "",         swatch_fmt)
+            ws.write(r, start_col + 1, lbl,        name_fmt)
+            ws.write(r, start_col + 2, val,        val_fmt)
+            ws.write(r, start_col + 3, val / total, pct_fmt)
+
+        # Column widths for legend block
+        ws.set_column(start_col,     start_col,     3)
+        ws.set_column(start_col + 1, start_col + 1,
+                      max((len(str(l)) for l in labels), default=12) + 4)
+        ws.set_column(start_col + 2, start_col + 2, 10)
+        ws.set_column(start_col + 3, start_col + 3, 10)
+
+    # Chart anchor row (0-indexed)
+    CHART_ROW = TOTAL_ROW + 2
+    # Approx rows a 360px-tall chart occupies at default 20px row height
+    PIE_ROWS  = 19
+
+    # ── PIE 1 — Closed Incidents By Module ───────────────────────────────────
     pie1 = wb.add_chart({"type": "pie"})
     pie1.add_series({
         "name":       "Closed Incidents By Module",
         "categories": [SUMMARY_SHEET_NAME, DATA_START, 1, DATA_START + n - 1, 1],
         "values":     [SUMMARY_SHEET_NAME, DATA_START, 2, DATA_START + n - 1, 2],
-        "data_labels": _LABELS,
+        "points":     _pie_points(n),
     })
     pie1.set_title({"name": "Closed Incidents By Module"})
-    pie1.set_legend({"position": "bottom"})
+    pie1.set_legend({"none": True})
     pie1.set_style(10)
-    pie1.set_size({"width": 480, "height": 360})
-    sw.insert_chart(TOTAL_ROW + 2, 0, pie1)
+    pie1.set_size({"width": 420, "height": 360})
+    sw.insert_chart(CHART_ROW, 0, pie1)
 
-    # ── PIE 2 — Overall Incident Status (all data, unique IDs) ───────────────
+    # Legend table for pie1 — directly below the chart
+    L1_ROW = CHART_ROW + PIE_ROWS
+    _write_legend(sw, L1_ROW, 0, module_names, module_counts)
+
+    # ── PIE 2 — Overall Incident Status ──────────────────────────────────────
     ns = len(status_labels)
     if ns > 0:
         STATUS_SHEET = "Status Data"
@@ -495,19 +556,23 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
             "name":       "Overall Incident Status",
             "categories": [STATUS_SHEET, 0, 0, ns - 1, 0],
             "values":     [STATUS_SHEET, 0, 1, ns - 1, 1],
-            "data_labels": _LABELS,
+            "points":     _pie_points(ns),
         })
         pie2.set_title({"name": "Overall Incident Status (All Modules, Unique IDs)"})
-        pie2.set_legend({"position": "bottom"})
+        pie2.set_legend({"none": True})
         pie2.set_style(10)
-        pie2.set_size({"width": 480, "height": 360})
-        sw.insert_chart(TOTAL_ROW + 2, 7, pie2)
+        pie2.set_size({"width": 420, "height": 360})
+        sw.insert_chart(CHART_ROW, 7, pie2)
 
-    # ── USER TABLE + PIE 3 — Closed By (date range, unique incidents) ─────────
+        # Legend table for pie2 — below pie2, same start row as pie1 legend
+        _write_legend(sw, L1_ROW, 7, status_labels, status_counts)
+
+    # ── USER TABLE + PIE 3 ────────────────────────────────────────────────────
     nu = len(user_names)
     if nu > 0:
-        # Place user table below the charts — charts are ~18 rows tall at default height
-        USER_TABLE_START = TOTAL_ROW + 22
+        # Push user section below the tallest of the two legend tables
+        legend_rows      = max(n, ns if ns > 0 else 0) + 3
+        USER_TABLE_START = L1_ROW + legend_rows + 2
         USER_HDR_ROW     = USER_TABLE_START + 1
         USER_DATA_START  = USER_HDR_ROW + 1
         USER_TOTAL_ROW   = USER_DATA_START + nu
@@ -520,9 +585,9 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
 
         # Column headers
         sw.set_row(USER_HDR_ROW, 22)
-        sw.write(USER_HDR_ROW, 0, "#",                       f_col_hdr)
-        sw.write(USER_HDR_ROW, 1, "Closed By",               f_col_hdr)
-        sw.write(USER_HDR_ROW, 2, "Unique Incidents Closed",  f_col_hdr)
+        sw.write(USER_HDR_ROW, 0, "#",                      f_col_hdr)
+        sw.write(USER_HDR_ROW, 1, "Closed By",              f_col_hdr)
+        sw.write(USER_HDR_ROW, 2, "Unique Incidents Closed", f_col_hdr)
 
         # Data rows
         for i in range(nu):
@@ -542,8 +607,6 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
             f_total,
         )
 
-        # Column widths already set above — reuse same columns A B C
-
         # User data sheet for pie3 reference
         USER_SHEET = "User Data"
         us = wb.add_worksheet(USER_SHEET)
@@ -556,13 +619,17 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
             "name":       "Incidents Closed By User",
             "categories": [USER_SHEET, 0, 0, nu - 1, 0],
             "values":     [USER_SHEET, 0, 1, nu - 1, 1],
-            "data_labels": _LABELS,
+            "points":     _pie_points(nu),
         })
         pie3.set_title({"name": "Incidents Closed By User (Date Range)"})
-        pie3.set_legend({"position": "bottom"})
+        pie3.set_legend({"none": True})
         pie3.set_style(10)
-        pie3.set_size({"width": 480, "height": 360})
+        pie3.set_size({"width": 420, "height": 360})
         sw.insert_chart(USER_TOTAL_ROW + 2, 0, pie3)
+
+        # Legend table for pie3 — directly below pie3
+        _write_legend(sw, USER_TOTAL_ROW + 2 + PIE_ROWS,
+                      0, user_names, user_counts)
 
     # ── DATA SHEETS — only modules with incidents, only counted rows ─────────
     # filtered_raw contains only the deduped rows that were counted.
