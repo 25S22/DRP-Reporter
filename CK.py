@@ -33,20 +33,20 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # =============================================================================
-# >>>  CONFIGURATION — only edit these five lines  <<<
+# >>>  CONFIGURATION — only edit these six lines  <<<
 # =============================================================================
 
 INPUT_FILE_PATH  = "incidents.xlsx"
+OUTPUT_FOLDER    = "reports"              # folder where reports are saved (created if missing)
 COL_INCIDENT_ID  = "Incident Id"
 COL_CLOSURE_DATE = "Incident Closure on"
 COL_STATUS       = "Status"
-COL_CLOSED_BY    = "Incident Closed By"   # column name for the resolver/assignee
+COL_CLOSED_BY    = "Incident Closed By"
 
 # =============================================================================
 # INTERNALS
 # =============================================================================
 
-OUTPUT_FILE_PATH   = "incidents_report.xlsx"
 SUMMARY_SHEET_NAME = "Summary Dashboard"
 
 # ---------------------------------------------------------------------------
@@ -325,9 +325,10 @@ def compute_user_breakdown(filtered_raw, sheet_names):
 
 def build_workbook(module_names, module_counts, status_labels, status_counts,
                    user_names, user_counts,
-                   filtered_raw, counts, sheet_names, start_dt, end_dt):
+                   filtered_raw, counts, sheet_names,
+                   start_dt, end_dt, output_path):
 
-    wb = xlsxwriter.Workbook(OUTPUT_FILE_PATH)
+    wb = xlsxwriter.Workbook(output_path)
 
     # ── FORMATS ──────────────────────────────────────────────────────────────
     NAVY    = "#1F3864"
@@ -792,12 +793,23 @@ def main():
     # Step 3c — user-wise breakdown (date range filtered data)
     user_names, user_counts = compute_user_breakdown(filtered_raw, sheet_names)
 
+    # Build output file path — folder created if it doesn't exist
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    date_range_str = (
+        f"{start_dt.strftime('%d %b %Y')} - {end_dt.strftime('%d %b %Y')}"
+    )
+    output_path = os.path.join(
+        OUTPUT_FOLDER,
+        f"CloudSek Incident Review - {date_range_str}.xlsx"
+    )
+
     # Step 4 — write output
     build_workbook(module_names, module_counts, status_labels, status_counts,
                    user_names, user_counts,
-                   filtered_raw, counts, sheet_names, start_dt, end_dt)
+                   filtered_raw, counts, sheet_names, start_dt, end_dt,
+                   output_path)
 
-    print(f"\n  Report saved -> {OUTPUT_FILE_PATH}")
+    print(f"\n  Report saved -> {output_path}")
     print("Done.\n")
 
 
