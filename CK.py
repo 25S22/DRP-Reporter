@@ -2,19 +2,23 @@
 =============================================================================
 INCIDENT REPORT GENERATOR
 =============================================================================
-CONFIGURATION — only 4 things to set:
+CONFIGURATION — only 5 things to set:
   INPUT_FILE_PATH  : path to the source Excel workbook
   COL_INCIDENT_ID  : exact column name for the Incident ID
   COL_CLOSURE_DATE : exact column name for the Closure Date
   COL_STATUS       : exact column name for the Status column
+  COL_CLOSED_BY    : exact column name for who closed the incident
 
 Everything else is automatic — date range is prompted at runtime.
 
 Summary sheet contains:
   1. Module-wise unique closed incidents table (date range filtered)
   2. Pie chart — "Closed Incidents By Module" (date range filtered)
-  3. Pie chart — "Overall Incident Status" (all data, all modules,
-     unique by Incident ID; Closed variants grouped as one slice)
+  3. Pie chart — "Overall Incident Status" (all data, unique IDs)
+  4. User-wise closed incidents table + pie (date range filtered)
+
+All pie chart labels are printed OUTSIDE the slice with leader lines —
+  name, count and % shown in bold navy text, never overlapping the colours.
 =============================================================================
 """
 
@@ -29,13 +33,14 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # =============================================================================
-# >>>  CONFIGURATION — only edit these four lines  <<<
+# >>>  CONFIGURATION — only edit these five lines  <<<
 # =============================================================================
 
 INPUT_FILE_PATH  = "incidents.xlsx"
 COL_INCIDENT_ID  = "Incident Id"
 COL_CLOSURE_DATE = "Incident Closure on"
 COL_STATUS       = "Status"
+COL_CLOSED_BY    = "Incident Closed By"   # column name for the resolver/assignee
 
 # =============================================================================
 # INTERNALS
@@ -265,10 +270,61 @@ def compute_status_breakdown(processed_raw, sheet_names):
     return labels, status_counts
 
 # ---------------------------------------------------------------------------
+# STEP 3c — USER-WISE BREAKDOWN  (date range filtered, unique incident IDs)
+# ---------------------------------------------------------------------------
+
+def compute_user_breakdown(filtered_raw, sheet_names):
+    """
+    Across all filtered+deduped sheets (date range already applied),
+    combine and deduplicate globally on COL_INCIDENT_ID, then count
+    unique incidents per person in COL_CLOSED_BY.
+    Returns two plain lists sorted descending: user_names, user_counts.
+    """
+    frames = []
+    for name in sheet_names:
+        df = filtered_raw.get(name, pd.DataFrame())
+        if df.empty:
+            continue
+        cols = [c for c in [COL_INCIDENT_ID, COL_CLOSED_BY] if c in df.columns]
+        if len(cols) == 2:
+            frames.append(df[cols].copy())
+
+    if not frames:
+        print(f"  WARNING: Column '{COL_CLOSED_BY}' not found — user breakdown skipped.")
+        return [], []
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(subset=[COL_INCIDENT_ID])
+
+    # Drop blank assignees
+    combined = combined[
+        ~combined[COL_CLOSED_BY].astype(str).str.strip().str.lower().isin(
+            ["", "nan", "none", "n/a", "-"]
+        )
+    ]
+
+    counts = (
+        combined[COL_CLOSED_BY]
+        .astype(str).str.strip()
+        .value_counts()
+        .sort_values(ascending=False)
+    )
+
+    user_names  = list(counts.index)
+    user_counts = [int(c) for c in counts.values]
+
+    print(f"\n  Closed-by breakdown (date range, unique incidents):")
+    for u, c in zip(user_names, user_counts):
+        print(f"    {u}: {c}")
+
+    return user_names, user_counts
+
+# ---------------------------------------------------------------------------
 # STEP 4 — BUILD OUTPUT WORKBOOK
 # ---------------------------------------------------------------------------
 
 def build_workbook(module_names, module_counts, status_labels, status_counts,
+                   user_names, user_counts,
                    filtered_raw, counts, sheet_names, start_dt, end_dt):
 
     wb = xlsxwriter.Workbook(OUTPUT_FILE_PATH)
@@ -398,21 +454,26 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
     sw.set_column(2, 2, 28)
     sw.freeze_panes(HDR_ROW, 0)
 
+    # Shared data_labels config — labels printed OUTSIDE the slice with leader
+    # lines. "outside_end" position + navy bold text = clean, never overlaps slices.
+    _LABELS = {
+        "category":   True,
+        "value":      True,
+        "percentage": True,
+        "separator":  "\n",
+        "position":   "outside_end",
+        "font":       {"bold": True, "size": 9, "color": "#1F3864"},
+        "border":     {"none": True},
+        "fill":       {"none": True},
+    }
+
     # ── PIE 1 — Closed Incidents By Module (date range filtered) ─────────────
     pie1 = wb.add_chart({"type": "pie"})
     pie1.add_series({
         "name":       "Closed Incidents By Module",
         "categories": [SUMMARY_SHEET_NAME, DATA_START, 1, DATA_START + n - 1, 1],
         "values":     [SUMMARY_SHEET_NAME, DATA_START, 2, DATA_START + n - 1, 2],
-        "data_labels": {
-            "category":   True,
-            "value":      True,
-            "percentage": True,
-            "separator":  "\n",
-            "font":       {"bold": True, "size": 10, "color": "#FFFFFF"},
-            "border":     {"none": True},
-            "fill":       {"none": True},
-        },
+        "data_labels": _LABELS,
     })
     pie1.set_title({"name": "Closed Incidents By Module"})
     pie1.set_legend({"position": "bottom"})
@@ -434,21 +495,74 @@ def build_workbook(module_names, module_counts, status_labels, status_counts,
             "name":       "Overall Incident Status",
             "categories": [STATUS_SHEET, 0, 0, ns - 1, 0],
             "values":     [STATUS_SHEET, 0, 1, ns - 1, 1],
-            "data_labels": {
-                "category":   True,
-                "value":      True,
-                "percentage": True,
-                "separator":  "\n",
-                "font":       {"bold": True, "size": 10, "color": "#FFFFFF"},
-                "border":     {"none": True},
-                "fill":       {"none": True},
-            },
+            "data_labels": _LABELS,
         })
         pie2.set_title({"name": "Overall Incident Status (All Modules, Unique IDs)"})
         pie2.set_legend({"position": "bottom"})
         pie2.set_style(10)
         pie2.set_size({"width": 480, "height": 360})
         sw.insert_chart(TOTAL_ROW + 2, 7, pie2)
+
+    # ── USER TABLE + PIE 3 — Closed By (date range, unique incidents) ─────────
+    nu = len(user_names)
+    if nu > 0:
+        # Place user table below the charts — charts are ~18 rows tall at default height
+        USER_TABLE_START = TOTAL_ROW + 22
+        USER_HDR_ROW     = USER_TABLE_START + 1
+        USER_DATA_START  = USER_HDR_ROW + 1
+        USER_TOTAL_ROW   = USER_DATA_START + nu
+
+        # Section title
+        sw.set_row(USER_TABLE_START, 24)
+        sw.write(USER_TABLE_START, 0,
+                 "Incidents Closed By — User Wise (Date Range)",
+                 f_section)
+
+        # Column headers
+        sw.set_row(USER_HDR_ROW, 22)
+        sw.write(USER_HDR_ROW, 0, "#",                       f_col_hdr)
+        sw.write(USER_HDR_ROW, 1, "Closed By",               f_col_hdr)
+        sw.write(USER_HDR_ROW, 2, "Unique Incidents Closed",  f_col_hdr)
+
+        # Data rows
+        for i in range(nu):
+            r   = USER_DATA_START + i
+            alt = (i % 2 == 1)
+            sw.set_row(r, 18)
+            sw.write(r, 0, i + 1,          f_num_alt if alt else f_num)
+            sw.write(r, 1, user_names[i],  f_lft_alt if alt else f_lft)
+            sw.write(r, 2, user_counts[i], f_num_alt if alt else f_num)
+
+        # Total row
+        sw.set_row(USER_TOTAL_ROW, 22)
+        sw.merge_range(USER_TOTAL_ROW, 0, USER_TOTAL_ROW, 1, "TOTAL", f_total)
+        sw.write_formula(
+            USER_TOTAL_ROW, 2,
+            f"=SUM(C{USER_DATA_START + 1}:C{USER_DATA_START + nu})",
+            f_total,
+        )
+
+        # Column widths already set above — reuse same columns A B C
+
+        # User data sheet for pie3 reference
+        USER_SHEET = "User Data"
+        us = wb.add_worksheet(USER_SHEET)
+        for i, (uname, ucnt) in enumerate(zip(user_names, user_counts)):
+            us.write(i, 0, uname)
+            us.write(i, 1, ucnt)
+
+        pie3 = wb.add_chart({"type": "pie"})
+        pie3.add_series({
+            "name":       "Incidents Closed By User",
+            "categories": [USER_SHEET, 0, 0, nu - 1, 0],
+            "values":     [USER_SHEET, 0, 1, nu - 1, 1],
+            "data_labels": _LABELS,
+        })
+        pie3.set_title({"name": "Incidents Closed By User (Date Range)"})
+        pie3.set_legend({"position": "bottom"})
+        pie3.set_style(10)
+        pie3.set_size({"width": 480, "height": 360})
+        sw.insert_chart(USER_TOTAL_ROW + 2, 0, pie3)
 
     # ── DATA SHEETS — only modules with incidents, only counted rows ─────────
     # filtered_raw contains only the deduped rows that were counted.
@@ -608,8 +722,12 @@ def main():
     # Step 3b — overall status breakdown across all modules, all data
     status_labels, status_counts = compute_status_breakdown(processed_raw, sheet_names)
 
+    # Step 3c — user-wise breakdown (date range filtered data)
+    user_names, user_counts = compute_user_breakdown(filtered_raw, sheet_names)
+
     # Step 4 — write output
     build_workbook(module_names, module_counts, status_labels, status_counts,
+                   user_names, user_counts,
                    filtered_raw, counts, sheet_names, start_dt, end_dt)
 
     print(f"\n  Report saved -> {OUTPUT_FILE_PATH}")
