@@ -495,7 +495,10 @@ def build_workbook(pwd_labels, pwd_counts, top_emails,
             sw.write(EMAIL_HDR_ROW, 2, "Breach Count",    f_col_hdr_green)
 
             max_email_len = max((len(str(e)) for e, _ in top_emails), default=20)
-            sw.set_column(0, 0, max(sw.col_size_changed(0), 6))
+            
+            # ---> THE FIX IS APPLIED ON THIS LINE <---
+            sw.set_column(0, 0, 6)
+            
             sw.set_column(1, 1, max(max_email_len + 4, 36))
             sw.set_column(2, 2, max(16, 16))
 
