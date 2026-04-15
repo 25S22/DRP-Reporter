@@ -117,7 +117,7 @@ def collect_results(org_name, num_results):
 
     collected      = {}
     BATCH_SIZE     = 100
-    MAX_ATTEMPTS = 2
+    MAX_RETRIES = 1
     RETRY_WAIT_RANGE = (12, 20)
     QUERY_SLEEP_RANGE = (2.5, 5.0)
     BATCH_SLEEP_RANGE = (4.0, 8.0)
@@ -144,9 +144,8 @@ def collect_results(org_name, num_results):
         if can_paginate:
             requested = want
         else:
-            cumulative_requested = min(num_results, len(collected) + want)
-            requested = cumulative_requested
-        for attempt in range(MAX_ATTEMPTS):
+            requested = min(num_results, len(collected) + want)
+        for attempt in range(MAX_RETRIES + 1):
             try:
                 kwargs = {"num_results": requested}
                 if supports_advanced:
@@ -162,7 +161,7 @@ def collect_results(org_name, num_results):
                 batch = list(search(query, **kwargs))
                 break
             except Exception as e:
-                if attempt < (MAX_ATTEMPTS - 1):
+                if attempt < MAX_RETRIES:
                     wait_s = random.uniform(*RETRY_WAIT_RANGE)
                     print(f"\n  [WARN] Error: {e}. Retrying in {wait_s:.1f} s …")
                     time.sleep(wait_s)
