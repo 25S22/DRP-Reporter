@@ -134,11 +134,15 @@ def collect_results(org_name, num_results):
 
     while len(collected) < num_results:
         want = min(BATCH_SIZE, num_results - len(collected))
-        print(f"  → Batch start={start:>5}  want={want:<4}  "
+        batch_start = start if can_paginate else len(collected)
+        print(f"  → Batch start={batch_start:>5}  want={want:<4}  "
               f"collected so far={len(collected)}", end="  ", flush=True)
 
         batch = []
-        requested = want if can_paginate else min(num_results, len(collected) + want)
+        if can_paginate:
+            requested = want
+        else:
+            requested = min(num_results, len(collected) + want)
         for attempt in range(TOTAL_ATTEMPTS):
             try:
                 kwargs = {"num_results": requested}
@@ -186,7 +190,8 @@ def collect_results(org_name, num_results):
         else:
             dupe_streak = 0
 
-        start = start + len(batch) if can_paginate else len(collected)
+        if can_paginate:
+            start += len(batch)
         sleep_s = random.uniform(*BATCH_SLEEP_RANGE)
         print(f"       sleeping {sleep_s:.1f} s …")
         time.sleep(sleep_s)
