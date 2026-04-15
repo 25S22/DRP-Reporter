@@ -3,6 +3,7 @@ import re
 import time
 import random
 import sys
+import inspect
 import pandas as pd
 from googlesearch import search
 
@@ -44,12 +45,12 @@ def collect_inputs():
 
     print("\n── Step 2: Search Volume ─────────────────────────────────────────")
     while True:
-        raw = prompt("  Max results to retrieve (e.g. 1000)", default=1000)
+        raw = prompt("  Max results to retrieve (max 10000)", default=10000)
         try:
             num_results = int(raw)
-            if num_results > 0:
+            if 0 < num_results <= 10000:
                 break
-            print("  [!] Must be a positive integer.")
+            print("  [!] Must be between 1 and 10000.")
         except ValueError:
             print("  [!] Please enter a valid integer.")
 
@@ -119,38 +120,44 @@ def collect_results(org_name, num_results):
     start          = 0
     dupe_streak    = 0
     MAX_DUPE_STREAK = 3
+    search_params = inspect.signature(search).parameters
+    supports_start = "start" in search_params
+    supports_start_num = "start_num" in search_params
+    supports_sleep_interval = "sleep_interval" in search_params
+    supports_advanced = "advanced" in search_params
+    supports_timeout = "timeout" in search_params
+    can_paginate = supports_start or supports_start_num
 
     while len(collected) < num_results:
         want = min(BATCH_SIZE, num_results - len(collected))
         print(f"  → Batch start={start:>5}  want={want:<4}  "
               f"collected so far={len(collected)}", end="  ", flush=True)
 
-        try:
-            batch = list(
-                search(
-                    query,
-                    num_results=want,
-                    advanced=True,
-                    sleep_interval=random.uniform(3, 6),
-                    start=start,
-                )
-            )
-        except Exception as e:
-            print(f"\n  [WARN] Error: {e}. Retrying in 30 s …")
-            time.sleep(30)
+        batch = []
+        requested = want if can_paginate else min(num_results, start + want)
+        for attempt in range(2):
             try:
-                batch = list(
-                    search(
-                        query,
-                        num_results=want,
-                        advanced=True,
-                        sleep_interval=random.uniform(5, 10),
-                        start=start,
-                    )
-                )
-            except Exception as e2:
-                print(f"\n  [ERROR] Retry failed: {e2}. Stopping.")
+                kwargs = {"num_results": requested}
+                if supports_advanced:
+                    kwargs["advanced"] = True
+                if supports_sleep_interval:
+                    kwargs["sleep_interval"] = random.uniform(1.2, 2.8)
+                if supports_timeout:
+                    kwargs["timeout"] = 12
+                if supports_start:
+                    kwargs["start"] = start
+                elif supports_start_num:
+                    kwargs["start_num"] = start
+                batch = list(search(query, **kwargs))
                 break
+            except Exception as e:
+                if attempt == 0:
+                    wait_s = random.uniform(8, 14)
+                    print(f"\n  [WARN] Error: {e}. Retrying in {wait_s:.1f} s …")
+                    time.sleep(wait_s)
+                else:
+                    print(f"\n  [ERROR] Retry failed: {e}. Stopping.")
+                    return collected
 
         if not batch:
             print("\n  [*] Google returned empty batch – no more results available.")
@@ -175,8 +182,8 @@ def collect_results(org_name, num_results):
         else:
             dupe_streak = 0
 
-        start += len(batch)
-        sleep_s = random.uniform(5, 12)
+        start = start + len(batch) if can_paginate else len(collected)
+        sleep_s = random.uniform(1.5, 4.0)
         print(f"       sleeping {sleep_s:.1f} s …")
         time.sleep(sleep_s)
 
@@ -266,4 +273,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
