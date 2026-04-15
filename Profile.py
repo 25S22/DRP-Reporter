@@ -117,6 +117,10 @@ def collect_results(org_name, num_results):
 
     collected      = {}
     BATCH_SIZE     = 100
+    MAX_RETRY_ATTEMPTS = 2
+    RETRY_WAIT_RANGE = (12, 20)
+    QUERY_SLEEP_RANGE = (2.5, 5.0)
+    BATCH_SLEEP_RANGE = (4.0, 8.0)
     start          = 0
     dupe_streak    = 0
     MAX_DUPE_STREAK = 3
@@ -135,13 +139,13 @@ def collect_results(org_name, num_results):
 
         batch = []
         requested = want if can_paginate else min(num_results, start + want)
-        for attempt in range(2):
+        for attempt in range(MAX_RETRY_ATTEMPTS):
             try:
                 kwargs = {"num_results": requested}
                 if supports_advanced:
                     kwargs["advanced"] = True
                 if supports_sleep_interval:
-                    kwargs["sleep_interval"] = random.uniform(1.2, 2.8)
+                    kwargs["sleep_interval"] = random.uniform(*QUERY_SLEEP_RANGE)
                 if supports_timeout:
                     kwargs["timeout"] = 12
                 if supports_start:
@@ -151,8 +155,8 @@ def collect_results(org_name, num_results):
                 batch = list(search(query, **kwargs))
                 break
             except Exception as e:
-                if attempt == 0:
-                    wait_s = random.uniform(8, 14)
+                if attempt < (MAX_RETRY_ATTEMPTS - 1):
+                    wait_s = random.uniform(*RETRY_WAIT_RANGE)
                     print(f"\n  [WARN] Error: {e}. Retrying in {wait_s:.1f} s …")
                     time.sleep(wait_s)
                 else:
@@ -183,7 +187,7 @@ def collect_results(org_name, num_results):
             dupe_streak = 0
 
         start = start + len(batch) if can_paginate else len(collected)
-        sleep_s = random.uniform(1.5, 4.0)
+        sleep_s = random.uniform(*BATCH_SLEEP_RANGE)
         print(f"       sleeping {sleep_s:.1f} s …")
         time.sleep(sleep_s)
 
