@@ -3,6 +3,11 @@ import re
 import time
 import random
 import sys
+from dataclasses import dataclass
+from html import unescape
+from urllib.parse import urlencode, unquote, urlparse
+from urllib.request import Request, urlopen
+
 import pandas as pd
 from googlesearch import search
 
@@ -108,6 +113,99 @@ def parse_title(title):
         return None, None
     return name, position
 
+@dataclass
+class SearchItem:
+    url: str
+    title: str = ""
+    description: str = ""
+
+def _safe_text(value):
+    return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", " ", value or ""))).strip()
+
+def _normalize_linkedin_url(url):
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url.strip())
+        if not parsed.scheme:
+            return ""
+        clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+        return clean
+    except Exception:
+        return ""
+
+def _search_batch_with_library(query, want, start):
+    calls = [
+        {"query": query, "num_results": want, "advanced": True,  "sleep_interval": random.uniform(2, 5), "start": start},
+        {"query": query, "num_results": want, "advanced": True,  "sleep_interval": random.uniform(2, 5), "start_num": start},
+        {"query": query, "num_results": want, "advanced": False, "sleep_interval": random.uniform(2, 5), "start": start},
+        {"query": query, "num_results": want, "advanced": False, "sleep_interval": random.uniform(2, 5), "start_num": start},
+    ]
+    for args in calls:
+        try:
+            raw_batch = list(search(**args))
+            out = []
+            for sr in raw_batch:
+                if isinstance(sr, str):
+                    out.append(SearchItem(url=sr))
+                    continue
+                out.append(
+                    SearchItem(
+                        url=getattr(sr, "url", "") or getattr(sr, "link", "") or getattr(sr, "href", "") or "",
+                        title=getattr(sr, "title", "") or "",
+                        description=getattr(sr, "description", "") or getattr(sr, "desc", "") or getattr(sr, "snippet", "") or "",
+                    )
+                )
+            return out
+        except TypeError:
+            continue
+        except Exception:
+            continue
+    return []
+
+def _search_batch_html_fallback(query, want, start):
+    params = {"q": query, "num": min(10, max(1, want)), "start": start, "hl": "en"}
+    req = Request(
+        "https://www.google.com/search?" + urlencode(params),
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
+    try:
+        with urlopen(req, timeout=20) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    results = []
+    link_pat = re.compile(
+        r'<a[^>]+href="/url\?q=([^"&]+)[^"]*"[^>]*>.*?<h3[^>]*>(.*?)</h3>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    snippet_pat = re.compile(
+        r'<div[^>]+class="[^"]*(?:VwiC3b|s3v9rd)[^"]*"[^>]*>(.*?)</div>',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    for m in link_pat.finditer(html):
+        url = _normalize_linkedin_url(unquote(m.group(1)))
+        if "linkedin.com/in/" not in url:
+            continue
+        title = _safe_text(m.group(2))
+        tail = html[m.end(): m.end() + 1400]
+        sm = snippet_pat.search(tail)
+        desc = _safe_text(sm.group(1)) if sm else ""
+        results.append(SearchItem(url=url, title=title, description=desc))
+        if len(results) >= want:
+            break
+
+    return results
+
 # ── Google Search Collector ────────────────────────────────────────────────────
 def collect_results(org_name, num_results):
     query = f'site:linkedin.com/in "{org_name}"'
@@ -115,7 +213,7 @@ def collect_results(org_name, num_results):
     print(f"[*] Target count : {num_results}\n")
 
     collected      = {}
-    BATCH_SIZE     = 100
+    BATCH_SIZE     = 10
     start          = 0
     dupe_streak    = 0
     MAX_DUPE_STREAK = 3
@@ -126,31 +224,26 @@ def collect_results(org_name, num_results):
               f"collected so far={len(collected)}", end="  ", flush=True)
 
         try:
-            batch = list(
-                search(
-                    query,
-                    num_results=want,
-                    advanced=True,
-                    sleep_interval=random.uniform(3, 6),
-                    start=start,
-                )
-            )
+            batch = _search_batch_with_library(query, want, start)
         except Exception as e:
             print(f"\n  [WARN] Error: {e}. Retrying in 30 s …")
             time.sleep(30)
             try:
-                batch = list(
-                    search(
-                        query,
-                        num_results=want,
-                        advanced=True,
-                        sleep_interval=random.uniform(5, 10),
-                        start=start,
-                    )
-                )
+                batch = _search_batch_with_library(query, want, start)
             except Exception as e2:
                 print(f"\n  [ERROR] Retry failed: {e2}. Stopping.")
                 break
+
+        if not batch and start == 0:
+            print("\n  [WARN] Library returned no results. Trying HTML fallback …")
+            batch = _search_batch_html_fallback(query, want, start)
+
+        if not batch and start == 0:
+            alt_query = f"site:linkedin.com/in {org_name}"
+            print("  [WARN] Retrying with relaxed query …")
+            batch = _search_batch_with_library(alt_query, want, start)
+            if not batch:
+                batch = _search_batch_html_fallback(alt_query, want, start)
 
         if not batch:
             print("\n  [*] Google returned empty batch – no more results available.")
@@ -158,7 +251,7 @@ def collect_results(org_name, num_results):
 
         new_count = 0
         for sr in batch:
-            url = getattr(sr, "url", "") or ""
+            url = _normalize_linkedin_url(getattr(sr, "url", "") or getattr(sr, "link", "") or getattr(sr, "href", "") or "")
             if url and url not in collected:
                 collected[url] = sr
                 new_count += 1
@@ -175,7 +268,7 @@ def collect_results(org_name, num_results):
         else:
             dupe_streak = 0
 
-        start += len(batch)
+        start += want
         sleep_s = random.uniform(5, 12)
         print(f"       sleeping {sleep_s:.1f} s …")
         time.sleep(sleep_s)
@@ -266,4 +359,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
