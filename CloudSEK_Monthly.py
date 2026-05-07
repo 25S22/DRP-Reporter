@@ -429,7 +429,7 @@ def _add_insights_panel(sw, wb, cursor,
  
     # ── Section label ─────────────────────────────────────────────────────────
     INSIGHT_START = 0
-    INSIGHT_END   = 14  # columns 0-14 (15 columns total) for full-width card
+    INSIGHT_END   = 14  # last column index for the 15-column (0-14) summary grid
     sw.set_row(cursor, 16)
     sw.merge_range(cursor, INSIGHT_START, cursor, INSIGHT_END,
                    "  KEY INSIGHTS  —  AUTO-GENERATED FROM PERIOD DATA",
@@ -768,6 +768,7 @@ def build_workbook(
             sw.write(cursor, ci, h, f_hdr_purp)
         cursor += 1
         total_u = sum(union_status_counts) or 1
+        # use module-level _STATUS_RAG for consistent status colors
         for lbl, cnt in zip(union_status_labels, union_status_counts):
             bg = _STATUS_RAG.get(lbl, ALT)
             sw.write(cursor, 0, lbl,
