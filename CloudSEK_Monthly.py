@@ -428,10 +428,10 @@ def _add_insights_panel(sw, wb, cursor,
     ]
  
     # ── Section label ─────────────────────────────────────────────────────────
-    BOX_W = 15  # spans 15 summary columns (0-14) for a full-width insight card
-    INSIGHT_END  = BOX_W - 1
+    INSIGHT_START = 0
+    INSIGHT_END   = 14  # summary sheet uses columns 0-14 for full-width card
     sw.set_row(cursor, 16)
-    sw.merge_range(cursor, 0, cursor, INSIGHT_END,
+    sw.merge_range(cursor, INSIGHT_START, cursor, INSIGHT_END,
                    "  KEY INSIGHTS  —  AUTO-GENERATED FROM PERIOD DATA",
                    _f(bold=True, font_size=9, font_color="#374151", italic=True,
                       bg_color="#F9FAFB", align="left",
@@ -444,8 +444,9 @@ def _add_insights_panel(sw, wb, cursor,
     sw.set_row(cursor + 2, 16)   # subtitle row
     sw.set_row(cursor + 3,  6)   # thin accent strip
  
-    for bi, bx in enumerate(boxes):
-        c1 = bi * BOX_W;  c2 = c1 + BOX_W - 1
+    if boxes:
+        bx = boxes[0]
+        c1 = INSIGHT_START;  c2 = INSIGHT_END
  
         # Icon / header band
         sw.merge_range(cursor, c1, cursor, c2, bx["icon"],
@@ -757,7 +758,6 @@ def build_workbook(
         cursor = TR + 2
  
     # ── UNION STATUS MINI-TABLE ───────────────────────────────────────────────
-    status_colors = _STATUS_RAG
     if union_status_labels:
         sw.set_row(cursor, 26)
         sw.write(cursor, 0,
@@ -769,7 +769,7 @@ def build_workbook(
         cursor += 1
         total_u = sum(union_status_counts) or 1
         for lbl, cnt in zip(union_status_labels, union_status_counts):
-            bg = status_colors.get(lbl, ALT)
+            bg = _STATUS_RAG.get(lbl, ALT)
             sw.write(cursor, 0, lbl,
                      _f(bold=True, align="left",   border=1, bg_color=bg,
                         font_color=WHITE))
