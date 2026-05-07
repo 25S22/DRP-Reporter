@@ -428,8 +428,8 @@ def _add_insights_panel(sw, wb, cursor,
     ]
  
     # ── Section label ─────────────────────────────────────────────────────────
-    INSIGHT_COLS = 15
-    INSIGHT_END  = INSIGHT_COLS - 1
+    BOX_W = 15  # single card spans full width
+    INSIGHT_END  = BOX_W - 1
     sw.set_row(cursor, 16)
     sw.merge_range(cursor, 0, cursor, INSIGHT_END,
                    "  KEY INSIGHTS  —  AUTO-GENERATED FROM PERIOD DATA",
@@ -439,7 +439,6 @@ def _add_insights_panel(sw, wb, cursor,
                       top_color="#E5E7EB", bottom_color="#E5E7EB"))
     cursor += 1
  
-    BOX_W = INSIGHT_COLS  # single card spans full width
     sw.set_row(cursor,     20)   # icon header row
     sw.set_row(cursor + 1, 44)   # big metric row
     sw.set_row(cursor + 2, 16)   # subtitle row
@@ -758,8 +757,6 @@ def build_workbook(
         cursor = TR + 2
  
     # ── UNION STATUS MINI-TABLE ───────────────────────────────────────────────
-    _STATUS_RAG = {"Open": "#EF4444", "In Progress": "#F59E0B", "Closed": "#22C55E"}
- 
     if union_status_labels:
         sw.set_row(cursor, 26)
         sw.write(cursor, 0,
