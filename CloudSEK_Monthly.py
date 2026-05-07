@@ -15,33 +15,31 @@ SUMMARY DASHBOARD LAYOUT (monthly stakeholder deck)
   ┌──────────────────────────────────────────────────────────────────────┐
   │  BANNER — report title + date range                                  │
   ├────────────┬────────────┬──────────────────┬────────────────────────┤
-  │  TOTAL     │  TOTAL     │  RESOLUTION      │  STILL PENDING         │
-  │  RAISED    │  CLOSED    │  RATE  (RAG)     │  (RAG — lower=better)  │
+  │  TOTAL IN  │  CLOSED    │  IN PROGRESS     │  OPEN / PENDING        │
+  │  PERIOD    │  (RAG)     │  (RAG)           │  (RAG — lower=better)  │
   ├────────────┴────────────┴──────────────────┴────────────────────────┤
-  │ ① Module table — Closed in range          (navy)                    │
-  │ ② Module table — Created in range         (green)                   │
   │ ③ Union table + status mini-table         (purple)                  │
-  ├────────────────────┬───────────────────┬───────────────────────────┤
-  │ Horizontal bar     │ Donut (RAG)       │ Clustered bar             │
-  │ Closed per module  │ Open/InProg/Close │ Created vs Closed         │
-  ├────────────────────┴───────────────────┴───────────────────────────┤
+  ├────────────────────────────────────────────────────────────────────-┤
+  │ Stacked horizontal bar — per module union count, split by status    │
+  │   ■ Closed (green)  ■ In Progress (amber)  ■ Open (red)            │
+  ├────────────────────────────────────────────────────────────────────-┤
   │ User table + horizontal bar chart                                   │
-  └─────────────────────────────────────────────────────────────────────┘
+  └──────────────────────────────────────────────────────────────────────┘
 
 CHART DESIGN DECISIONS
-  • Horizontal bar  — lengths are trivially comparable; module names fit
-                      naturally as row labels; sorted so worst module is
-                      immediately visible at the top
-  • Donut (RAG)     — three-bucket health signal with semantic red/amber/
-                      green; total shown in title; far less ambiguous than
-                      a pie with arbitrary colours
-  • Clustered bar   — the only chart that shows whether a module is
-                      ACCUMULATING a backlog (created > closed) or
-                      CLEARING it — impossible to see in any pie chart
+  • Stacked horizontal bar — total bar = union count per module (all
+    incidents touched in the period). The three coloured segments give
+    an at-a-glance RAG health signal: a wide red or amber band signals
+    a module still carrying open work. Sorted so the most-impacted
+    module sits at the top. Data labels on each segment prevent readers
+    having to estimate.
+  • Donut (RAG)     — three-bucket health signal with semantic colours;
+                      total shown in title; far less ambiguous than a pie.
   • Hidden _ChartData sheet — all chart cell-refs point here so they
-                      never break when table row numbers shift
+                      never break when table row numbers shift.
 
 All filtering/aggregation logic is unchanged from the previous version.
+Only U (union) data sheets are written; C and R sheets are omitted.
 =============================================================================
 """
 
@@ -87,7 +85,7 @@ _PALETTE = [
 ]
 
 # ---------------------------------------------------------------------------
-# DATE PARSING  (unchanged)
+# DATE PARSING
 # ---------------------------------------------------------------------------
 
 _ORDINAL_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", re.IGNORECASE)
@@ -152,7 +150,7 @@ def _prompt_date(label):
             print(f"  Could not understand '{raw}'. Please try again.")
 
 # ---------------------------------------------------------------------------
-# STEP 1 — LOAD  (unchanged)
+# STEP 1 — LOAD
 # ---------------------------------------------------------------------------
 
 def load_all_sheets(path):
@@ -172,7 +170,7 @@ def load_all_sheets(path):
     return merged
 
 # ---------------------------------------------------------------------------
-# STEP 2 — PROCESS  (unchanged)
+# STEP 2 — PROCESS
 # ---------------------------------------------------------------------------
 
 def process_sheet(df, start_dt, end_dt):
@@ -204,7 +202,7 @@ def process_sheet(df, start_dt, end_dt):
     )
 
 # ---------------------------------------------------------------------------
-# STEP 3 — AGGREGATE  (unchanged)
+# STEP 3 — AGGREGATE
 # ---------------------------------------------------------------------------
 
 def aggregate(counts):
@@ -215,7 +213,7 @@ def aggregate(counts):
     return names, cnts
 
 # ---------------------------------------------------------------------------
-# STEP 3b — OVERALL STATUS BREAKDOWN  (unchanged)
+# STEP 3b — OVERALL STATUS BREAKDOWN
 # ---------------------------------------------------------------------------
 
 def _normalize_status(val):
@@ -258,7 +256,7 @@ def compute_status_breakdown(processed_raw, sheet_names):
     return labels, counts
 
 # ---------------------------------------------------------------------------
-# STEP 3c — USER-WISE BREAKDOWN  (unchanged)
+# STEP 3c — USER-WISE BREAKDOWN
 # ---------------------------------------------------------------------------
 
 def compute_user_breakdown(filtered_closure_raw, sheet_names):
@@ -289,7 +287,7 @@ def compute_user_breakdown(filtered_closure_raw, sheet_names):
     return names, counts
 
 # ---------------------------------------------------------------------------
-# STEP 3d — UNION STATUS BREAKDOWN  (unchanged)
+# STEP 3d — UNION STATUS BREAKDOWN
 # ---------------------------------------------------------------------------
 
 def compute_union_status_breakdown(filtered_union_raw, sheet_names):
@@ -320,7 +318,29 @@ def compute_union_status_breakdown(filtered_union_raw, sheet_names):
     return labels, counts
 
 # ---------------------------------------------------------------------------
-# STEP 3e — EMAIL EXTRACTION  (unchanged)
+# STEP 3e — PER-MODULE STATUS BREAKDOWN (union incidents)
+# ---------------------------------------------------------------------------
+
+def compute_union_module_status_breakdown(filtered_union_raw, sheet_names):
+    """
+    For each module (sheet) returns a dict of status counts across union rows.
+    Result: {module_name: {'Closed': n, 'In Progress': n, 'Open': n}}
+    """
+    result = {}
+    for name in sheet_names:
+        df = filtered_union_raw.get(name, pd.DataFrame())
+        breakdown = {"Closed": 0, "In Progress": 0, "Open": 0}
+        if not df.empty and COL_STATUS in df.columns:
+            for val in df[COL_STATUS]:
+                s = _normalize_status(val)
+                if s in breakdown:
+                    breakdown[s] += 1
+        if any(v > 0 for v in breakdown.values()):
+            result[name] = breakdown
+    return result
+
+# ---------------------------------------------------------------------------
+# STEP 3f — EMAIL EXTRACTION
 # ---------------------------------------------------------------------------
 
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
@@ -362,15 +382,14 @@ def extract_emails_closed_resolved(processed_raw, sheet_names):
 # ---------------------------------------------------------------------------
 
 def build_workbook(
-    module_names, module_counts,
-    created_module_names, created_module_counts,
-    union_module_names,   union_module_counts,
-    union_status_labels,  union_status_counts,
-    status_labels,        status_counts,
-    user_names,           user_counts,
+    union_module_names,        union_module_counts,
+    union_module_status,       # {module: {Closed, In Progress, Open}}
+    union_status_labels,       union_status_counts,
+    status_labels,             status_counts,
+    user_names,                user_counts,
     unique_emails,
-    filtered_closure_raw, filtered_creation_raw, filtered_union_raw,
-    counts_closure, counts_union,
+    filtered_union_raw,
+    counts_union,
     sheet_names,
     start_dt, end_dt,
     output_path,
@@ -388,32 +407,40 @@ def build_workbook(
     ALT     = "#EFF5FB"
     WHITE   = "#FFFFFF"
 
-    # ── KPI CALCULATIONS ─────────────────────────────────────────────────────
-    total_raised  = sum(created_module_counts) if created_module_counts else 0
-    total_closed  = sum(module_counts)
-    total_union   = sum(union_module_counts)   if union_module_counts   else 0
-    _denom        = total_raised if total_raised > 0 else (total_union or 1)
-    res_rate      = total_closed / _denom * 100
+    # Status palette (RAG)
+    CLR_CLOSED  = "#70AD47"   # green
+    CLR_INPROG  = "#FFC000"   # amber
+    CLR_OPEN    = "#C00000"   # red
+    CLR_CLOSED_D = "#375623"  # dark green text
+    CLR_INPROG_D = "#7F6000"  # dark amber text
+    CLR_OPEN_D   = "#9C0006"  # dark red text
 
-    still_open    = next((c for l, c in zip(union_status_labels, union_status_counts)
-                          if l == "Open"), 0)
-    in_progress   = next((c for l, c in zip(union_status_labels, union_status_counts)
+    # ── KPI CALCULATIONS ─────────────────────────────────────────────────────
+    total_union   = sum(union_module_counts) if union_module_counts else 0
+
+    closed_cnt    = next((c for l, c in zip(union_status_labels, union_status_counts)
+                          if l == "Closed"), 0)
+    inprog_cnt    = next((c for l, c in zip(union_status_labels, union_status_counts)
                           if l == "In Progress"), 0)
-    still_pending = still_open + in_progress
-    pend_pct      = still_pending / _denom * 100 if _denom else 0
+    open_cnt      = next((c for l, c in zip(union_status_labels, union_status_counts)
+                          if l == "Open"), 0)
+
+    _denom        = total_union or 1
+    res_rate      = closed_cnt / _denom * 100
+    pend_pct      = (open_cnt + inprog_cnt) / _denom * 100
 
     def _rag(value, g_thresh, a_thresh, higher_is_better=True):
         if higher_is_better:
-            if value >= g_thresh: return D_GREEN, LTGREEN
-            if value >= a_thresh: return "#7F6000", "#FFF2CC"
-            return "#9C0006", "#FFC7CE"
+            if value >= g_thresh: return D_GREEN, LTGREEN, CLR_CLOSED
+            if value >= a_thresh: return "#7F6000", "#FFF2CC", CLR_INPROG
+            return "#9C0006",  "#FFC7CE", CLR_OPEN
         else:
-            if value <= g_thresh: return D_GREEN, LTGREEN
-            if value <= a_thresh: return "#7F6000", "#FFF2CC"
-            return "#9C0006", "#FFC7CE"
+            if value <= g_thresh: return D_GREEN, LTGREEN, CLR_CLOSED
+            if value <= a_thresh: return "#7F6000", "#FFF2CC", CLR_INPROG
+            return "#9C0006",  "#FFC7CE", CLR_OPEN
 
-    rate_hdr, rate_bg = _rag(res_rate,   80, 60, higher_is_better=True)
-    pend_hdr, pend_bg = _rag(pend_pct,   10, 25, higher_is_better=False)
+    rate_hdr, rate_bg, rate_bar = _rag(res_rate, 80, 60, higher_is_better=True)
+    pend_hdr, pend_bg, pend_bar = _rag(pend_pct, 10, 25, higher_is_better=False)
 
     # ── FORMAT FACTORY ───────────────────────────────────────────────────────
     def _f(**kw):
@@ -443,48 +470,60 @@ def build_workbook(
         return _f(bold=True, font_size=11, font_color=fg,
                   bg_color=bg, align="center", border=2)
 
-    f_hdr_navy  = _hdr(NAVY);    f_tot_navy  = _tot(NAVY,    LTBLUE)
-    f_hdr_green = _hdr(D_GREEN); f_tot_green = _tot(D_GREEN, LTGREEN)
     f_hdr_purp  = _hdr(D_PURP);  f_tot_purp  = _tot(D_PURP,  LTPURP)
+    f_hdr_navy  = _hdr(NAVY);    f_tot_navy  = _tot(NAVY,    LTBLUE)
 
     # ── HIDDEN CHART-DATA SHEET ───────────────────────────────────────────────
-    # Decouples chart cell-refs from visible table row positions.
-    # All charts reference this sheet; tables can shift freely.
+    # Sorted by total union count descending (worst module first).
+    # Layout:
+    #   A  = module name
+    #   B  = Closed count     (green bar segment)
+    #   C  = In Progress count (amber bar segment)
+    #   D  = Open count       (red bar segment)
+    #   F  = overall status label (for donut)
+    #   G  = overall status count
+    #   I  = union status label
+    #   J  = union status count
+    #   L  = user name
+    #   M  = user count
+
     CDSHEET = "_ChartData"
     cd      = wb.add_worksheet(CDSHEET)
     cd.hide()
 
-    # Build a unified module list sorted by closed-count desc
-    all_mods    = list(dict.fromkeys(
-        list(module_names) + list(created_module_names) + list(union_module_names)
-    ))
-    closed_map  = dict(zip(module_names,         module_counts))
-    created_map = dict(zip(created_module_names, created_module_counts))
-    mods_sorted = sorted(all_mods, key=lambda m: closed_map.get(m, 0), reverse=True)
-    NM          = len(mods_sorted)
+    # Sort modules by union count descending
+    mods_sorted = sorted(
+        union_module_names,
+        key=lambda m: union_module_counts[list(union_module_names).index(m)],
+        reverse=True,
+    )
+    NM = len(mods_sorted)
 
-    # Cols A-C  (0-2):  module | closed | created
+    union_count_map  = dict(zip(union_module_names, union_module_counts))
+
     for i, m in enumerate(mods_sorted):
-        cd.write(i, 0, m)
-        cd.write(i, 1, closed_map.get(m,  0))
-        cd.write(i, 2, created_map.get(m, 0))
+        sb  = union_module_status.get(m, {"Closed": 0, "In Progress": 0, "Open": 0})
+        cd.write(i, 0, m)                      # A: module
+        cd.write(i, 1, sb.get("Closed", 0))    # B: closed
+        cd.write(i, 2, sb.get("In Progress", 0))  # C: in progress
+        cd.write(i, 3, sb.get("Open", 0))      # D: open
 
-    # Cols E-F  (4-5):  overall status label | count
+    # Col F-G: overall status (for donut on all data)
     NS = len(status_labels)
     for i, (lbl, cnt) in enumerate(zip(status_labels, status_counts)):
-        cd.write(i, 4, lbl)
-        cd.write(i, 5, cnt)
+        cd.write(i, 5, lbl)
+        cd.write(i, 6, cnt)
 
-    # Cols H-I  (7-8):  union status label | count
+    # Col I-J: union status
     for i, (lbl, cnt) in enumerate(zip(union_status_labels, union_status_counts)):
-        cd.write(i, 7, lbl)
-        cd.write(i, 8, cnt)
+        cd.write(i, 8, lbl)
+        cd.write(i, 9, cnt)
 
-    # Cols K-L  (10-11): user name | count
+    # Col L-M: user
     NU = len(user_names)
     for i, (u, c) in enumerate(zip(user_names, user_counts)):
-        cd.write(i, 10, u)
-        cd.write(i, 11, c)
+        cd.write(i, 11, u)
+        cd.write(i, 12, c)
 
     # ── SUMMARY SHEET ─────────────────────────────────────────────────────────
     sw = wb.add_worksheet(SUMMARY_SHEET_NAME)
@@ -502,23 +541,24 @@ def build_workbook(
     )
 
     # ── KPI SCORECARD (rows 2-4) ──────────────────────────────────────────────
+    # Four boxes: Total in Period | Closed | In Progress | Open/Pending
     KPI_TOP = 2
     BOX_W   = 3    # columns per box
 
     kpi = [
-        ("TOTAL RAISED",     str(total_raised) if total_raised else "N/A",
-         "Incidents created in range",    NAVY,     LTBLUE),
-        ("TOTAL CLOSED",     str(total_closed),
-         "Closure date in range",         D_GREEN,  LTGREEN),
-        ("RESOLUTION RATE",  f"{res_rate:.1f}%" if total_raised else "N/A",
-         "Closed / Raised in period",     rate_hdr, rate_bg),
-        ("STILL PENDING",    str(still_pending),
-         "Open + In Progress (union)",    pend_hdr, pend_bg),
+        ("TOTAL IN PERIOD",   str(total_union),
+         "Unique incidents (union)",         NAVY,     LTBLUE),
+        ("CLOSED",            str(closed_cnt),
+         f"{res_rate:.1f}% resolution rate", rate_hdr, rate_bg),
+        ("IN PROGRESS",       str(inprog_cnt),
+         "Still being worked",               CLR_INPROG_D, "#FFF2CC"),
+        ("OPEN / PENDING",    str(open_cnt),
+         f"{pend_pct:.1f}% of period total", pend_hdr, pend_bg),
     ]
 
-    sw.set_row(KPI_TOP,     18)   # label
-    sw.set_row(KPI_TOP + 1, 40)   # big number
-    sw.set_row(KPI_TOP + 2, 16)   # subtitle
+    sw.set_row(KPI_TOP,     18)
+    sw.set_row(KPI_TOP + 1, 40)
+    sw.set_row(KPI_TOP + 2, 16)
 
     for bi, (label, value, subtitle, hdr_c, bg_c) in enumerate(kpi):
         c1 = bi * BOX_W;  c2 = c1 + BOX_W - 1
@@ -532,54 +572,35 @@ def build_workbook(
                        _f(font_size=8, font_color="#595959", italic=True,
                           bg_color=bg_c, align="center", border=1))
 
-    cursor = KPI_TOP + 4   # start of tables
+    cursor = KPI_TOP + 4
 
-    # ── TABLE WRITER ─────────────────────────────────────────────────────────
-    def _write_table(top, names, cnts, hdr_fmt, tot_fmt, label):
-        n = len(names)
-        sw.set_row(top, 24)
-        sw.write(top, 0, label, f_section)
-        HDR = top + 1;  DS = HDR + 1;  TR = DS + n
-        sw.set_row(HDR, 22)
-        for ci, h in enumerate(["#", "Module Name", "Unique Incidents"]):
-            sw.write(HDR, ci, h, hdr_fmt)
-        for i in range(n):
-            r   = DS + i;  alt = (i % 2 == 1)
-            sw.set_row(r, 18)
-            sw.write(r, 0, i + 1,    f_num_alt if alt else f_num)
-            sw.write(r, 1, names[i], f_lft_alt if alt else f_lft)
-            sw.write(r, 2, cnts[i],  f_num_alt if alt else f_num)
-        sw.set_row(TR, 22)
-        sw.merge_range(TR, 0, TR, 1, "TOTAL", tot_fmt)
-        sw.write_formula(TR, 2, f"=SUM(C{DS+1}:C{DS+n})", tot_fmt)
-        return TR + 2
-
-    # ① closed
-    cursor = _write_table(cursor, module_names, module_counts,
-                          f_hdr_navy, f_tot_navy,
-                          "① Closed in Date Range — Module-wise (Closure Date filter)")
-    # ② created
-    if created_module_names:
-        cursor = _write_table(cursor, created_module_names, created_module_counts,
-                              f_hdr_green, f_tot_green,
-                              "② Created in Date Range — Module-wise (Creation Date filter)")
-    else:
-        sw.write(cursor, 0,
-                 "② No creation-date column configured or no incidents created in range.",
-                 f_section)
-        cursor += 2
-
-    # ③ union
+    # ── UNION TABLE (③) ───────────────────────────────────────────────────────
     if union_module_names:
-        cursor = _write_table(cursor, union_module_names, union_module_counts,
-                              f_hdr_purp, f_tot_purp,
-                              "③ UNION — Created OR Closed in Range (complete period picture)")
+        sw.set_row(cursor, 24)
+        sw.write(cursor, 0,
+                 "Incidents in Period — Module-wise  (Created OR Closed in Range)",
+                 f_section)
+        UHDR = cursor + 1;  UDS = UHDR + 1;  UTR = UDS + NM
+        sw.set_row(UHDR, 22)
+        for ci, h in enumerate(["#", "Module Name", "Unique Incidents"]):
+            sw.write(UHDR, ci, h, f_hdr_purp)
+        for i, m in enumerate(mods_sorted):
+            r   = UDS + i;  alt = (i % 2 == 1)
+            sw.set_row(r, 18)
+            sw.write(r, 0, i + 1, f_num_alt if alt else f_num)
+            sw.write(r, 1, m,     f_lft_alt if alt else f_lft)
+            sw.write(r, 2, union_count_map.get(m, 0),
+                     f_num_alt if alt else f_num)
+        sw.set_row(UTR, 22)
+        sw.merge_range(UTR, 0, UTR, 1, "TOTAL", f_tot_purp)
+        sw.write_formula(UTR, 2, f"=SUM(C{UDS+1}:C{UDS+NM})", f_tot_purp)
+        cursor = UTR + 2
 
-    # ③ union status mini-table
+    # ── UNION STATUS MINI-TABLE ───────────────────────────────────────────────
     if union_status_labels:
         sw.set_row(cursor, 20)
         sw.write(cursor, 0,
-                 "③ Union — Current Status of All Incidents in the Period", f_section)
+                 "Current Status Breakdown — All Incidents in Period", f_section)
         cursor += 1
         for ci, h in enumerate(["Status", "Count", "% Share"]):
             sw.write(cursor, ci, h, f_hdr_purp)
@@ -605,53 +626,98 @@ def build_workbook(
     cursor += 1
     CHART_ROW = cursor
 
-    # shared chart styling helper
     def _style(chart):
         chart.set_plotarea({"border": {"none": True}})
         chart.set_chartarea({"border": {"color": "#D9D9D9"},
                              "fill":   {"color": WHITE}})
         chart.set_style(2)
 
-    # ── CHART 1: Horizontal bar — Closed per module ───────────────────────────
-    # Sorted descending so the most-impacted module is at the top.
-    # Single professional-blue fill; data labels inside bars.
+    # ── CHART 1: Stacked horizontal bar — union per module, split by status ──
+    # Each module bar = total union incidents.
+    # Segments: Closed (green) | In Progress (amber) | Open (red)
+    # Sorted worst→best so problem modules are at top.
     if NM > 0:
-        bar1 = wb.add_chart({"type": "bar"})
-        bar1.add_series({
-            "name":       "Closed Incidents",
-            "categories": [CDSHEET, 0, 0, NM - 1, 0],
-            "values":     [CDSHEET, 0, 1, NM - 1, 1],
-            "fill":       {"color": "#4472C4"},
+        bar_h = max(360, NM * 38 + 120)
+        bar_w = 700
+
+        stacked = wb.add_chart({"type": "bar", "subtype": "stacked"})
+
+        # Series 1: Closed — green (bottom/left segment, most positive)
+        stacked.add_series({
+            "name":       "Closed",
+            "categories": [CDSHEET, 0, 0, NM - 1, 0],   # col A: module
+            "values":     [CDSHEET, 0, 1, NM - 1, 1],   # col B: closed
+            "fill":       {"color": CLR_CLOSED},
+            "border":     {"color": WHITE, "width": 0.75},
             "data_labels": {
                 "value":    True,
                 "position": "inside_end",
                 "font":     {"bold": True, "size": 9, "color": WHITE},
             },
         })
-        bar1.set_title({
-            "name":      f"Closed Incidents by Module  (total: {total_closed})",
-            "name_font": {"bold": True, "size": 11, "color": NAVY},
+        # Series 2: In Progress — amber
+        stacked.add_series({
+            "name":       "In Progress",
+            "categories": [CDSHEET, 0, 0, NM - 1, 0],
+            "values":     [CDSHEET, 0, 2, NM - 1, 2],   # col C: in progress
+            "fill":       {"color": CLR_INPROG},
+            "border":     {"color": WHITE, "width": 0.75},
+            "data_labels": {
+                "value":    True,
+                "position": "inside_end",
+                "font":     {"bold": True, "size": 9, "color": "#3A3A3A"},
+            },
         })
-        bar1.set_legend({"none": True})
-        bar1.set_x_axis({"num_font":       {"size": 9},
-                          "major_gridlines": {"visible": False}})
-        bar1.set_y_axis({"num_font":       {"size": 9, "bold": True}})
-        _style(bar1)
-        bar1.set_size({"width": 480, "height": max(280, NM * 28 + 100)})
-        sw.insert_chart(CHART_ROW, 0, bar1, {"x_offset": 5, "y_offset": 5})
+        # Series 3: Open — red (signals unresolved risk)
+        stacked.add_series({
+            "name":       "Open",
+            "categories": [CDSHEET, 0, 0, NM - 1, 0],
+            "values":     [CDSHEET, 0, 3, NM - 1, 3],   # col D: open
+            "fill":       {"color": CLR_OPEN},
+            "border":     {"color": WHITE, "width": 0.75},
+            "data_labels": {
+                "value":    True,
+                "position": "inside_end",
+                "font":     {"bold": True, "size": 9, "color": WHITE},
+            },
+        })
 
-    # ── CHART 2: Donut — Overall status with RAG colours ─────────────────────
-    # Red=Open / Amber=In Progress / Green=Closed.
-    # Total shown in title so stakeholders never have to add slices.
-    if NS > 0:
+        stacked.set_title({
+            "name": (
+                f"Incidents by Module — Period Total: {total_union}  "
+                f"│  ■ Closed  ■ In Progress  ■ Open"
+            ),
+            "name_font": {"bold": True, "size": 12, "color": NAVY},
+        })
+        stacked.set_legend({
+            "position":  "bottom",
+            "font":      {"bold": True, "size": 10},
+        })
+        stacked.set_x_axis({
+            "num_font":        {"size": 9},
+            "major_gridlines": {"visible": True,
+                                "line":    {"color": "#E0E0E0", "width": 0.5}},
+            "minor_gridlines": {"visible": False},
+        })
+        stacked.set_y_axis({
+            "num_font": {"size": 10, "bold": True},
+            "line":     {"none": True},
+        })
+        _style(stacked)
+        stacked.set_size({"width": bar_w, "height": bar_h})
+        sw.insert_chart(CHART_ROW, 0, stacked, {"x_offset": 5, "y_offset": 5})
+
+    # ── CHART 2: Donut — union status (period incidents only) ────────────────
+    NS_U = len(union_status_labels)
+    if NS_U > 0:
         donut = wb.add_chart({"type": "doughnut"})
         donut.add_series({
             "name":       "Status",
-            "categories": [CDSHEET, 0, 4, NS - 1, 4],
-            "values":     [CDSHEET, 0, 5, NS - 1, 5],
+            "categories": [CDSHEET, 0, 8, NS_U - 1, 8],
+            "values":     [CDSHEET, 0, 9, NS_U - 1, 9],
             "points": [
                 {"fill": {"color": _STATUS_RAG.get(l, "#4472C4")}}
-                for l in status_labels
+                for l in union_status_labels
             ],
             "data_labels": {
                 "percentage": True,
@@ -663,50 +729,18 @@ def build_workbook(
         })
         donut.set_title({
             "name": (
-                f"Overall Incident Status\n"
-                f"Total: {sum(status_counts)} unique incidents (all data)"
+                f"Status Mix — Period Incidents\n"
+                f"Total: {total_union} unique"
             ),
             "name_font": {"bold": True, "size": 10, "color": NAVY},
         })
         donut.set_legend({"none": True})
         _style(donut)
-        donut.set_size({"width": 380, "height": 380})
-        sw.insert_chart(CHART_ROW, 8, donut, {"x_offset": 5, "y_offset": 5})
+        donut.set_size({"width": 340, "height": 340})
+        # Place to the right of the stacked bar
+        sw.insert_chart(CHART_ROW, 12, donut, {"x_offset": 5, "y_offset": 5})
 
-    # ── CHART 3: Clustered horizontal bar — Created vs Closed per module ─────
-    # The only chart that shows whether a module is accumulating a backlog
-    # (created bar > closed bar) or clearing carry-over work.
-    has_creation_data = any(created_map.get(m, 0) > 0 for m in mods_sorted)
-    if NM > 0 and has_creation_data:
-        bar2 = wb.add_chart({"type": "bar", "subtype": "clustered"})
-        bar2.add_series({
-            "name":       "Closed in Range",
-            "categories": [CDSHEET, 0, 0, NM - 1, 0],
-            "values":     [CDSHEET, 0, 1, NM - 1, 1],
-            "fill":       {"color": "#4472C4"},
-            "data_labels": {"value": True, "font": {"size": 8}},
-        })
-        bar2.add_series({
-            "name":       "Created in Range",
-            "categories": [CDSHEET, 0, 0, NM - 1, 0],
-            "values":     [CDSHEET, 0, 2, NM - 1, 2],
-            "fill":       {"color": "#70AD47"},
-            "data_labels": {"value": True, "font": {"size": 8}},
-        })
-        bar2.set_title({
-            "name":      "Created vs Closed per Module",
-            "name_font": {"bold": True, "size": 11, "color": NAVY},
-        })
-        bar2.set_legend({"position": "bottom"})
-        bar2.set_x_axis({"num_font":       {"size": 9},
-                          "major_gridlines": {"visible": False}})
-        bar2.set_y_axis({"num_font":       {"size": 9, "bold": True}})
-        _style(bar2)
-        bar2.set_size({"width": 480, "height": max(300, NM * 40 + 120)})
-        sw.insert_chart(CHART_ROW, 15, bar2, {"x_offset": 5, "y_offset": 5})
-
-    # Advance cursor past chart area
-    chart_rows = max(NM * 2 + 6, 20)
+    chart_rows = max(NM * 3 + 6, 22)
     cursor     = CHART_ROW + chart_rows
 
     # ── USER TABLE + HORIZONTAL BAR ───────────────────────────────────────────
@@ -715,26 +749,27 @@ def build_workbook(
         sw.set_row(cursor, 24)
         sw.write(cursor, 0,
                  "Incidents Closed By — User Wise (Closure Date Range)", f_section)
-        UHDR = cursor + 1;  UDS = UHDR + 1;  UTR = UDS + NU
-        sw.set_row(UHDR, 22)
+        UHDR2 = cursor + 1;  UDS2 = UHDR2 + 1;  UTR2 = UDS2 + NU
+        sw.set_row(UHDR2, 22)
         for ci, h in enumerate(["#", "Closed By", "Unique Incidents Closed"]):
-            sw.write(UHDR, ci, h, f_hdr_navy)
+            sw.write(UHDR2, ci, h, f_hdr_navy)
         for i in range(NU):
-            r   = UDS + i;  alt = (i % 2 == 1)
+            r   = UDS2 + i;  alt = (i % 2 == 1)
             sw.set_row(r, 18)
-            sw.write(r, 0, i + 1,         f_num_alt if alt else f_num)
-            sw.write(r, 1, user_names[i], f_lft_alt if alt else f_lft)
+            sw.write(r, 0, i + 1,          f_num_alt if alt else f_num)
+            sw.write(r, 1, user_names[i],  f_lft_alt if alt else f_lft)
             sw.write(r, 2, user_counts[i], f_num_alt if alt else f_num)
-        sw.set_row(UTR, 22)
-        sw.merge_range(UTR, 0, UTR, 1, "TOTAL", f_tot_navy)
-        sw.write_formula(UTR, 2, f"=SUM(C{UDS+1}:C{UDS+NU})", f_tot_navy)
+        sw.set_row(UTR2, 22)
+        sw.merge_range(UTR2, 0, UTR2, 1, "TOTAL", f_tot_navy)
+        sw.write_formula(UTR2, 2, f"=SUM(C{UDS2+1}:C{UDS2+NU})", f_tot_navy)
 
         bar3 = wb.add_chart({"type": "bar"})
         bar3.add_series({
             "name":       "Incidents Closed",
-            "categories": [CDSHEET, 0, 10, NU - 1, 10],
-            "values":     [CDSHEET, 0, 11, NU - 1, 11],
-            "fill":       {"color": "#5B9BD5"},
+            "categories": [CDSHEET, 0, 11, NU - 1, 11],
+            "values":     [CDSHEET, 0, 12, NU - 1, 12],
+            "fill":       {"color": MIDBLUE},
+            "border":     {"color": WHITE, "width": 0.75},
             "data_labels": {
                 "value":    True,
                 "position": "inside_end",
@@ -747,11 +782,14 @@ def build_workbook(
         })
         bar3.set_legend({"none": True})
         bar3.set_x_axis({"num_font":       {"size": 9},
-                          "major_gridlines": {"visible": False}})
-        bar3.set_y_axis({"num_font":       {"size": 9, "bold": True}})
+                          "major_gridlines": {"visible": True,
+                                              "line":    {"color": "#E0E0E0",
+                                                          "width": 0.5}}})
+        bar3.set_y_axis({"num_font": {"size": 10, "bold": True},
+                          "line":     {"none": True}})
         _style(bar3)
-        bar3.set_size({"width": 480, "height": max(280, NU * 28 + 100)})
-        sw.insert_chart(UTR + 2, 0, bar3, {"x_offset": 5, "y_offset": 5})
+        bar3.set_size({"width": 520, "height": max(300, NU * 30 + 120)})
+        sw.insert_chart(UTR2 + 2, 0, bar3, {"x_offset": 5, "y_offset": 5})
 
     # ── EMAIL SHEET ───────────────────────────────────────────────────────────
     if unique_emails:
@@ -778,7 +816,7 @@ def build_workbook(
             ew.write(r, 0, i + 1, _f(align="center", border=1, bg_color=bg))
             ew.write(r, 1, email,  _f(align="left",   border=1, bg_color=bg))
 
-    # ── DATA SHEETS ───────────────────────────────────────────────────────────
+    # ── U (UNION) DATA SHEETS ONLY ────────────────────────────────────────────
     date_cols = {c for c in [COL_CREATION_DATE, COL_CLOSURE_DATE] if c}
 
     def _write_data_sheet(ws_name, df):
@@ -816,20 +854,15 @@ def build_workbook(
         dw.freeze_panes(1, 0)
         dw.autofilter(0, 0, nr, nc - 1)
 
+    # Write only U sheets (union: created OR closed in range)
     for name in sheet_names:
-        short = name[:25]
-        if counts_closure.get(name, 0) > 0:
-            _write_data_sheet(f"C - {short}", filtered_closure_raw.get(name))
-        fc = filtered_creation_raw.get(name)
-        if fc is not None and not fc.empty:
-            _write_data_sheet(f"R - {short}", fc)
         if counts_union.get(name, 0) > 0:
-            _write_data_sheet(f"U - {short}", filtered_union_raw.get(name))
+            _write_data_sheet(f"U - {name[:25]}", filtered_union_raw.get(name))
 
     wb.close()
 
 # ---------------------------------------------------------------------------
-# MAIN  (unchanged)
+# MAIN
 # ---------------------------------------------------------------------------
 
 def main():
@@ -904,36 +937,26 @@ def main():
                 print(f"    WARNING: {len(truly)} rows had unparseable closure dates!")
                 print(f"    Samples: {list(orig.loc[truly.index].unique()[:5])}")
 
-    module_names, module_counts = aggregate(counts_closure)
+    if not any(c > 0 for c in counts_union.values()):
+        sys.exit("\nNo incidents found in the specified date range.\n")
 
-    if COL_CREATION_DATE and any(c > 0 for c in counts_creation.values()):
-        pairs = [(n, c) for n, c in counts_creation.items() if c > 0]
-        created_module_names  = [p[0] for p in pairs]
-        created_module_counts = [p[1] for p in pairs]
-    else:
-        created_module_names, created_module_counts = [], []
+    # Union module list
+    pairs               = [(n, c) for n, c in counts_union.items() if c > 0]
+    union_module_names  = [p[0] for p in pairs]
+    union_module_counts = [p[1] for p in pairs]
 
-    if any(c > 0 for c in counts_union.values()):
-        pairs = [(n, c) for n, c in counts_union.items() if c > 0]
-        union_module_names  = [p[0] for p in pairs]
-        union_module_counts = [p[1] for p in pairs]
-    else:
-        union_module_names, union_module_counts = [], []
-
-    print(f"\n  Closed in range  : {len(module_names)} modules / "
-          f"{sum(module_counts)} incidents")
-    print(f"  Created in range : {len(created_module_names)} modules / "
-          f"{sum(created_module_counts)} incidents")
-    print(f"  Union            : {len(union_module_names)} modules / "
+    print(f"\n  Union (period total): {len(union_module_names)} modules / "
           f"{sum(union_module_counts)} incidents")
 
-    status_labels,       status_counts       = compute_status_breakdown(
+    status_labels,          status_counts          = compute_status_breakdown(
         processed_raw, sheet_names)
-    user_names,          user_counts         = compute_user_breakdown(
+    user_names,             user_counts            = compute_user_breakdown(
         filtered_closure_raw, sheet_names)
-    union_status_labels, union_status_counts = compute_union_status_breakdown(
+    union_status_labels,    union_status_counts    = compute_union_status_breakdown(
         filtered_union_raw, sheet_names)
-    unique_emails                            = extract_emails_closed_resolved(
+    union_module_status                            = compute_union_module_status_breakdown(
+        filtered_union_raw, sheet_names)
+    unique_emails                                  = extract_emails_closed_resolved(
         processed_raw, sheet_names)
 
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
@@ -943,15 +966,14 @@ def main():
                                   f"Incident Review - {date_range_str}.xlsx")
 
     build_workbook(
-        module_names, module_counts,
-        created_module_names, created_module_counts,
-        union_module_names,   union_module_counts,
-        union_status_labels,  union_status_counts,
-        status_labels,        status_counts,
-        user_names,           user_counts,
+        union_module_names,     union_module_counts,
+        union_module_status,
+        union_status_labels,    union_status_counts,
+        status_labels,          status_counts,
+        user_names,             user_counts,
         unique_emails,
-        filtered_closure_raw, filtered_creation_raw, filtered_union_raw,
-        counts_closure, counts_union,
+        filtered_union_raw,
+        counts_union,
         sheet_names,
         start_dt, end_dt,
         output_path,
