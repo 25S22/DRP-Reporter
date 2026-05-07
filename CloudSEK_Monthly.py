@@ -420,7 +420,7 @@ def _add_insights_panel(sw, wb, cursor,
  
     boxes = [
         {
-            "icon": "MOST IMPACTED MODULE",
+            "icon": "◆  MOST IMPACTED MODULE",
             "val":  most_mod[:24],
             "sub":  f"{most_cnt:,} incidents in period",
             "h": "#2563EB", "b": "#E0E7FF", "t": "#111827",
@@ -437,7 +437,7 @@ def _add_insights_panel(sw, wb, cursor,
                       top_color="#E5E7EB", bottom_color="#E5E7EB"))
     cursor += 1
  
-    BOX_W = 15
+    BOX_W = 15  # spans columns 0-14
     sw.set_row(cursor,     20)   # icon header row
     sw.set_row(cursor + 1, 44)   # big metric row
     sw.set_row(cursor + 2, 16)   # subtitle row
@@ -693,7 +693,7 @@ def build_workbook(
                           bg_color=bg_c, align="center",
                           left=1, right=1, top=0, bottom=0,
                           left_color="#E5E7EB", right_color="#E5E7EB",
-                          font_name="Consolas"))   # monospace for block chars
+                          font_name="Courier New"))   # monospace for block chars
  
         # Thin accent strip  (solid colour = visual "bottom border")
         sw.merge_range(KPI_TOP + 3, c1, KPI_TOP + 3, c2, "",
