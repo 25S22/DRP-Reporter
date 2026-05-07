@@ -428,7 +428,7 @@ def _add_insights_panel(sw, wb, cursor,
     ]
  
     # ── Section label ─────────────────────────────────────────────────────────
-    BOX_W = 15  # spans summary columns 0-14 (full-width insight card)
+    BOX_W = 15  # spans 15 summary columns (0-14) for a full-width insight card
     INSIGHT_END  = BOX_W - 1
     sw.set_row(cursor, 16)
     sw.merge_range(cursor, 0, cursor, INSIGHT_END,
@@ -757,6 +757,7 @@ def build_workbook(
         cursor = TR + 2
  
     # ── UNION STATUS MINI-TABLE ───────────────────────────────────────────────
+    status_colors = _STATUS_RAG
     if union_status_labels:
         sw.set_row(cursor, 26)
         sw.write(cursor, 0,
@@ -768,7 +769,7 @@ def build_workbook(
         cursor += 1
         total_u = sum(union_status_counts) or 1
         for lbl, cnt in zip(union_status_labels, union_status_counts):
-            bg = _STATUS_RAG.get(lbl, ALT)
+            bg = status_colors.get(lbl, ALT)
             sw.write(cursor, 0, lbl,
                      _f(bold=True, align="left",   border=1, bg_color=bg,
                         font_color=WHITE))
