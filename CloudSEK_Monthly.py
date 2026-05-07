@@ -429,7 +429,7 @@ def _add_insights_panel(sw, wb, cursor,
  
     # ── Section label ─────────────────────────────────────────────────────────
     INSIGHT_START = 0
-    INSIGHT_END   = 14  # summary sheet uses columns 0-14 for full-width card
+    INSIGHT_END   = 14  # columns 0-14 (15 columns total) for full-width card
     sw.set_row(cursor, 16)
     sw.merge_range(cursor, INSIGHT_START, cursor, INSIGHT_END,
                    "  KEY INSIGHTS  —  AUTO-GENERATED FROM PERIOD DATA",
@@ -501,7 +501,7 @@ def build_workbook(
     ALT      = "#F3F4F6"
     WHITE    = "#FFFFFF"
     OFFWHITE = "#F9FAFB"
-    SUBTLE   = "#4B5563"
+    SUBTLE   = "#4B5563"  # secondary text (axes, legends, captions)
  
     CLR_CLOSED   = "#22C55E"
     CLR_INPROG   = "#F59E0B"
