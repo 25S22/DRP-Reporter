@@ -73,15 +73,15 @@ COL_COMMENT       = "Comment"
 SUMMARY_SHEET_NAME = "Summary Dashboard"
 
 _STATUS_RAG = {
-    "Open":        "#C00000",
-    "In Progress": "#FFC000",
-    "Closed":      "#70AD47",
+    "Open":        "#EF4444",
+    "In Progress": "#F59E0B",
+    "Closed":      "#22C55E",
 }
 
 _PALETTE = [
-    "#4472C4", "#ED7D31", "#70AD47", "#FFC000", "#5B9BD5",
-    "#A9D18E", "#FF7C80", "#9E480E", "#7030A0", "#636363",
-    "#255E91", "#43682B", "#C00000", "#997300", "#7B5EA7",
+    "#2563EB", "#F59E0B", "#22C55E", "#EF4444", "#8B5CF6",
+    "#06B6D4", "#EC4899", "#A855F7", "#14B8A6", "#64748B",
+    "#1D4ED8", "#0F766E", "#B91C1C", "#C2410C", "#4C1D95",
 ]
 
 # ---------------------------------------------------------------------------
@@ -397,7 +397,7 @@ def _add_insights_panel(sw, wb, cursor,
     """
  
     def _f(**kw):
-        base = {"font_name": "Arial", "font_size": 10, "valign": "vcenter"}
+        base = {"font_name": "Calibri", "font_size": 10, "valign": "vcenter"}
         base.update(kw)
         return wb.add_format(base)
  
@@ -405,9 +405,9 @@ def _add_insights_panel(sw, wb, cursor,
     most_mod = mods_sorted[0] if mods_sorted else "—"
     most_cnt = union_count_map.get(most_mod, 0)
  
-    if   res_rate >= 80: rate_h, rate_b, rate_s = "#375623", "#E2EFDA", "✓  ON TARGET"
-    elif res_rate >= 60: rate_h, rate_b, rate_s = "#7F6000", "#FFF2CC", "~  NEEDS ATTENTION"
-    else:                rate_h, rate_b, rate_s = "#9C0006", "#FFC7CE", "✗  BELOW TARGET"
+    if   res_rate >= 80: rate_h, rate_b, rate_s = "#065F46", "#D1FAE5", "✓  ON TARGET"
+    elif res_rate >= 60: rate_h, rate_b, rate_s = "#B45309", "#FEF3C7", "~  NEEDS ATTENTION"
+    else:                rate_h, rate_b, rate_s = "#B91C1C", "#FEE2E2", "✗  BELOW TARGET"
  
     risk_mod = "—"; risk_cnt = 0
     for m in mods_sorted:
@@ -423,63 +423,45 @@ def _add_insights_panel(sw, wb, cursor,
             "icon": "◆  MOST IMPACTED MODULE",
             "val":  most_mod[:24],
             "sub":  f"{most_cnt:,} incidents in period",
-            "h": "#2E75B6", "b": "#DEEAF1", "t": "#1F3864",
-        },
-        {
-            "icon": "●  RESOLUTION HEALTH",
-            "val":  f"{res_rate:.1f}%",
-            "sub":  rate_s,
-            "h": rate_h, "b": rate_b, "t": rate_h,
-        },
-        {
-            "icon": "▲  BIGGEST OPEN RISK",
-            "val":  risk_mod[:24] if risk_cnt else "None  —  All Clear!",
-            "sub":  f"{risk_cnt:,} open incidents" if risk_cnt else "✓  Zero open incidents",
-            "h": "#9C0006" if risk_cnt else "#375623",
-            "b": "#FFC7CE" if risk_cnt else "#E2EFDA",
-            "t": "#9C0006" if risk_cnt else "#375623",
-        },
-        {
-            "icon": "★  TOP RESOLVER",
-            "val":  top_u[:24],
-            "sub":  f"{top_c:,} incidents closed",
-            "h": "#7030A0", "b": "#EAE0F1", "t": "#4B2878",
+            "h": "#2563EB", "b": "#E0E7FF", "t": "#111827",
         },
     ]
  
     # ── Section label ─────────────────────────────────────────────────────────
-    sw.set_row(cursor, 14)
-    sw.merge_range(cursor, 0, cursor, 11,
+    INSIGHT_START = 0
+    INSIGHT_END   = 14  # last column index for the 15-column (0-14) summary grid
+    sw.set_row(cursor, 16)
+    sw.merge_range(cursor, INSIGHT_START, cursor, INSIGHT_END,
                    "  KEY INSIGHTS  —  AUTO-GENERATED FROM PERIOD DATA",
-                   _f(bold=True, font_size=9, font_color="#595959", italic=True,
-                      bg_color="#F5F5F5", align="left",
-                      left=5, left_color="#2E75B6", top=1, bottom=1,
-                      top_color="#BFBFBF", bottom_color="#BFBFBF"))
+                   _f(bold=True, font_size=9, font_color="#374151", italic=True,
+                      bg_color="#F9FAFB", align="left",
+                      left=5, left_color="#2563EB", top=1, bottom=1,
+                      top_color="#E5E7EB", bottom_color="#E5E7EB"))
     cursor += 1
  
-    BOX_W = 3
-    sw.set_row(cursor,     18)   # icon header row
-    sw.set_row(cursor + 1, 38)   # big metric row
-    sw.set_row(cursor + 2, 14)   # subtitle row
-    sw.set_row(cursor + 3,  4)   # thin accent strip
+    sw.set_row(cursor,     20)   # icon header row
+    sw.set_row(cursor + 1, 44)   # big metric row
+    sw.set_row(cursor + 2, 16)   # subtitle row
+    sw.set_row(cursor + 3,  6)   # thin accent strip
  
-    for bi, bx in enumerate(boxes):
-        c1 = bi * BOX_W;  c2 = c1 + BOX_W - 1
+    if boxes:
+        bx = boxes[0]
+        c1 = INSIGHT_START;  c2 = INSIGHT_END
  
         # Icon / header band
         sw.merge_range(cursor, c1, cursor, c2, bx["icon"],
-                       _f(bold=True, font_size=8, font_color=WHITE,
+                       _f(bold=True, font_size=9, font_color=WHITE,
                           bg_color=bx["h"], align="center",
                           border=1, top=2, top_color=bx["h"]))
  
         # Large metric value
         sw.merge_range(cursor + 1, c1, cursor + 1, c2, bx["val"],
-                       _f(bold=True, font_size=16, font_color=bx["t"],
+                       _f(bold=True, font_size=20, font_color=bx["t"],
                           bg_color=bx["b"], align="center", border=1))
  
         # Italic subtitle
         sw.merge_range(cursor + 2, c1, cursor + 2, c2, bx["sub"],
-                       _f(font_size=8, italic=True, font_color="#595959",
+                       _f(font_size=9, italic=True, font_color="#4B5563",
                           bg_color=bx["b"], align="center", border=1))
  
         # Thin bottom accent strip (same colour as header)
@@ -509,23 +491,24 @@ def build_workbook(
     wb = xlsxwriter.Workbook(output_path)
  
     # ── COLOUR TOKENS ────────────────────────────────────────────────────────
-    NAVY    = "#1F3864"
-    MIDBLUE = "#2E75B6"
-    LTBLUE  = "#DEEAF1"
-    D_GREEN = "#375623"
-    LTGREEN = "#E2EFDA"
-    D_PURP  = "#4B2878"
-    LTPURP  = "#EAE0F1"
-    ALT     = "#F2F8FD"
-    WHITE   = "#FFFFFF"
-    OFFWHITE = "#FAFAFA"
+    NAVY     = "#111827"
+    MIDBLUE  = "#2563EB"
+    LTBLUE   = "#DBEAFE"
+    D_GREEN  = "#065F46"
+    LTGREEN  = "#D1FAE5"
+    D_PURP   = "#6D28D9"
+    LTPURP   = "#EDE9FE"
+    ALT      = "#F3F4F6"
+    WHITE    = "#FFFFFF"
+    OFFWHITE = "#F9FAFB"
+    SUBTLE   = "#4B5563"  # secondary text (axes, legends, captions)
  
-    CLR_CLOSED  = "#70AD47"
-    CLR_INPROG  = "#FFC000"
-    CLR_OPEN    = "#C00000"
-    CLR_CLOSED_D = "#375623"
-    CLR_INPROG_D = "#7F6000"
-    CLR_OPEN_D   = "#9C0006"
+    CLR_CLOSED   = "#22C55E"
+    CLR_INPROG   = "#F59E0B"
+    CLR_OPEN     = "#EF4444"
+    CLR_CLOSED_D = "#15803D"
+    CLR_INPROG_D = "#B45309"
+    CLR_OPEN_D   = "#B91C1C"
  
     # ── KPI CALCULATIONS ─────────────────────────────────────────────────────
     total_union  = sum(union_module_counts) if union_module_counts else 0
@@ -542,44 +525,52 @@ def build_workbook(
     def _rag_colors(value, g, a, higher=True):
         if higher:
             if value >= g: return D_GREEN,     LTGREEN,  CLR_CLOSED
-            if value >= a: return CLR_INPROG_D, "#FFF2CC", CLR_INPROG
-            return CLR_OPEN_D, "#FFC7CE", CLR_OPEN
+            if value >= a: return CLR_INPROG_D, "#FEF3C7", CLR_INPROG
+            return CLR_OPEN_D, "#FEE2E2", CLR_OPEN
         else:
             if value <= g: return D_GREEN,     LTGREEN,  CLR_CLOSED
-            if value <= a: return CLR_INPROG_D, "#FFF2CC", CLR_INPROG
-            return CLR_OPEN_D, "#FFC7CE", CLR_OPEN
+            if value <= a: return CLR_INPROG_D, "#FEF3C7", CLR_INPROG
+            return CLR_OPEN_D, "#FEE2E2", CLR_OPEN
  
     rate_hdr, rate_bg, _ = _rag_colors(res_rate, 80, 60, higher=True)
     pend_hdr, pend_bg, _ = _rag_colors(pend_pct, 10, 25, higher=False)
  
     # ── FORMAT FACTORY ───────────────────────────────────────────────────────
     def _f(**kw):
-        base = {"font_name": "Arial", "font_size": 10, "valign": "vcenter"}
+        base = {"font_name": "Calibri", "font_size": 10, "valign": "vcenter"}
         base.update(kw)
         return wb.add_format(base)
  
-    f_num       = _f(align="center", border=1)
-    f_lft       = _f(align="left",   border=1)
-    f_num_alt   = _f(align="center", border=1, bg_color=ALT)
-    f_lft_alt   = _f(align="left",   border=1, bg_color=ALT)
+    border_grey = "#E5E7EB"
+    f_num       = _f(align="center", border=1, border_color=border_grey,
+                     font_color=NAVY)
+    f_lft       = _f(align="left",   border=1, border_color=border_grey,
+                     font_color=NAVY)
+    f_num_alt   = _f(align="center", border=1, border_color=border_grey,
+                     bg_color=ALT, font_color=NAVY)
+    f_lft_alt   = _f(align="left",   border=1, border_color=border_grey,
+                     bg_color=ALT, font_color=NAVY)
     f_data_hdr  = _f(bold=True, font_color=WHITE, bg_color=MIDBLUE,
-                     align="center", border=1)
-    f_cell      = _f(align="left",  border=1)
-    f_cell_alt  = _f(align="left",  border=1, bg_color=ALT)
-    f_date      = _f(align="left",  border=1, num_format="dd mmm yyyy")
-    f_date_alt  = _f(align="left",  border=1, bg_color=ALT,
-                     num_format="dd mmm yyyy")
+                     align="center", border=1, border_color=MIDBLUE)
+    f_cell      = _f(align="left",  border=1, border_color=border_grey,
+                     font_color=NAVY)
+    f_cell_alt  = _f(align="left",  border=1, border_color=border_grey,
+                     bg_color=ALT, font_color=NAVY)
+    f_date      = _f(align="left",  border=1, border_color=border_grey,
+                     num_format="dd mmm yyyy", font_color=NAVY)
+    f_date_alt  = _f(align="left",  border=1, border_color=border_grey,
+                     bg_color=ALT, num_format="dd mmm yyyy", font_color=NAVY)
  
     # Section heading — left accent bar effect
     f_section = _f(bold=True, font_size=12, font_color=NAVY,
-                   left=5, left_color=MIDBLUE, bg_color=WHITE)
+                   left=5, left_color=MIDBLUE, bg_color=OFFWHITE)
  
     def _hdr(bg):
         return _f(bold=True, font_size=11, font_color=WHITE,
-                  bg_color=bg, align="center", border=1)
+                  bg_color=bg, align="center", border=1, border_color=bg)
     def _tot(fg, bg):
         return _f(bold=True, font_size=11, font_color=fg,
-                  bg_color=bg, align="center", border=2)
+                  bg_color=bg, align="center", border=1, border_color=border_grey)
  
     f_hdr_purp = _hdr(D_PURP);  f_tot_purp = _tot(D_PURP, LTPURP)
     f_hdr_navy = _hdr(NAVY);    f_tot_navy = _tot(NAVY,   LTBLUE)
@@ -646,7 +637,7 @@ def build_workbook(
                    f"  Reporting Period:  "
                    f"{start_dt.strftime('%d %b %Y')}  ─  {end_dt.strftime('%d %b %Y')}"
                    f"     │     Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}",
-                   _f(font_size=10, font_color="#D6E4F7", italic=True,
+                   _f(font_size=10, font_color="#E0E7FF", italic=True,
                       bg_color=MIDBLUE, align="left", valign="vcenter"))
  
     sw.set_row(2, 8)    # breathing gap below banner
@@ -670,7 +661,7 @@ def build_workbook(
          rate_hdr, rate_bg),
         ("IN PROGRESS",       str(inprog_cnt),
          _progress_bar(inprog_cnt / _d * 100),
-         CLR_INPROG_D, "#FFF2CC"),
+         CLR_INPROG_D, "#FEF3C7"),
         ("OPEN / PENDING",    str(open_cnt),
          _progress_bar(pend_pct),
          pend_hdr, pend_bg),
@@ -687,20 +678,23 @@ def build_workbook(
  
         # Label header
         sw.merge_range(KPI_TOP, c1, KPI_TOP, c2, label,
-                       _f(bold=True, font_size=9, font_color=WHITE,
-                          bg_color=hdr_c, align="center", border=1))
+                       _f(bold=True, font_size=10, font_color=WHITE,
+                          bg_color=hdr_c, align="center", border=1,
+                          border_color=hdr_c))
  
         # Large number
         sw.merge_range(KPI_TOP + 1, c1, KPI_TOP + 1, c2, value,
-                       _f(bold=True, font_size=26, font_color=hdr_c,
+                       _f(bold=True, font_size=28, font_color=NAVY,
                           bg_color=bg_c, align="center",
-                          left=1, right=1, top=0, bottom=0))
+                          left=1, right=1, top=0, bottom=0,
+                          left_color="#E5E7EB", right_color="#E5E7EB"))
  
         # Progress bar row
         sw.merge_range(KPI_TOP + 2, c1, KPI_TOP + 2, c2, progbar,
                        _f(font_size=8, font_color=hdr_c, bold=True,
                           bg_color=bg_c, align="center",
                           left=1, right=1, top=0, bottom=0,
+                          left_color="#E5E7EB", right_color="#E5E7EB",
                           font_name="Courier New"))   # monospace for block chars
  
         # Thin accent strip  (solid colour = visual "bottom border")
@@ -750,8 +744,8 @@ def build_workbook(
         sw.conditional_format(DS, 2, TR - 1, 2, {
             "type":             "data_bar",
             "data_bar_2010":    True,
-            "bar_color":        "#4472C4",
-            "bar_border_color": "#2E75B6",
+            "bar_color":        "#60A5FA",
+            "bar_border_color": MIDBLUE,
             "bar_solid":        True,
             "min_type":         "num",
             "min_value":        0,
@@ -764,8 +758,6 @@ def build_workbook(
         cursor = TR + 2
  
     # ── UNION STATUS MINI-TABLE ───────────────────────────────────────────────
-    _STATUS_RAG = {"Open": "#C00000", "In Progress": "#FFC000", "Closed": "#70AD47"}
- 
     if union_status_labels:
         sw.set_row(cursor, 26)
         sw.write(cursor, 0,
@@ -776,6 +768,7 @@ def build_workbook(
             sw.write(cursor, ci, h, f_hdr_purp)
         cursor += 1
         total_u = sum(union_status_counts) or 1
+        # use module-level _STATUS_RAG for consistent status colors
         for lbl, cnt in zip(union_status_labels, union_status_counts):
             bg = _STATUS_RAG.get(lbl, ALT)
             sw.write(cursor, 0, lbl,
@@ -805,7 +798,7 @@ def build_workbook(
             "fill":   {"color": OFFWHITE},
         })
         chart.set_chartarea({
-            "border": {"color": "#D0D0D0", "width": 0.5},
+            "border": {"color": "#E5E7EB", "width": 0.75},
             "fill":   {"color": WHITE},
         })
         chart.set_style(2)
@@ -838,7 +831,7 @@ def build_workbook(
                 "value":    True,
                 "position": "inside_end",
                 "font":     {"bold": True, "size": 9, "color": WHITE,
-                             "name": "Arial"},
+                             "name": "Calibri"},
             },
         })
         # Series: In Progress (amber)
@@ -851,8 +844,8 @@ def build_workbook(
             "data_labels": {
                 "value":    True,
                 "position": "inside_end",
-                "font":     {"bold": True, "size": 9, "color": "#3A3A3A",
-                             "name": "Arial"},
+                "font":     {"bold": True, "size": 9, "color": NAVY,
+                             "name": "Calibri"},
             },
         })
         # Series: Open (red — signals unresolved risk)
@@ -866,30 +859,30 @@ def build_workbook(
                 "value":    True,
                 "position": "inside_end",
                 "font":     {"bold": True, "size": 9, "color": WHITE,
-                             "name": "Arial"},
+                             "name": "Calibri"},
             },
         })
  
         stacked.set_title({
             "name":      f"Incidents by Module  ·  Period Total: {total_union:,}",
             "name_font": {"bold": True, "size": 12, "color": NAVY,
-                          "name": "Arial"},
+                          "name": "Calibri"},
         })
         stacked.set_legend({
             "position": "bottom",
-            "font":     {"bold": True, "size": 10, "color": "#404040",
-                         "name": "Arial"},
-            "border":   {"color": "#E0E0E0"},
-            "fill":     {"color": "#F9F9F9"},
+            "font":     {"bold": True, "size": 10, "color": SUBTLE,
+                         "name": "Calibri"},
+            "border":   {"color": "#E5E7EB"},
+            "fill":     {"color": OFFWHITE},
         })
         stacked.set_x_axis({
-            "num_font":        {"size": 9, "color": "#595959"},
+            "num_font":        {"size": 9, "color": SUBTLE},
             "major_gridlines": {
                 "visible": True,
-                "line":    {"color": "#EBEBEB", "width": 0.6,
+                "line":    {"color": "#E5E7EB", "width": 0.6,
                             "dash_type": "dash"},
             },
-            "line":            {"color": "#BFBFBF"},
+            "line":            {"color": "#E5E7EB"},
             "num_format":      "0",
             "min":             0,
         })
@@ -916,7 +909,7 @@ def build_workbook(
             "categories": [CDSHEET, 0, 8, NS_U - 1, 8],
             "values":     [CDSHEET, 0, 9, NS_U - 1, 9],
             "points": [
-                {"fill": {"color": _STATUS_RAG.get(l, "#4472C4")}}
+                {"fill": {"color": _STATUS_RAG.get(l, MIDBLUE)}}
                 for l in union_status_labels
             ],
             "data_labels": {
@@ -924,7 +917,8 @@ def build_workbook(
                 "category":   True,
                 "value":      True,
                 "separator":  "\n",
-                "font":       {"bold": True, "size": 9, "name": "Arial"},
+                "font":       {"bold": True, "size": 9, "name": "Calibri",
+                               "color": NAVY},
             },
         })
         donut.set_title({
@@ -933,7 +927,7 @@ def build_workbook(
                 f"Total: {total_union:,} unique incidents"
             ),
             "name_font": {"bold": True, "size": 10, "color": NAVY,
-                          "name": "Arial"},
+                          "name": "Calibri"},
         })
         donut.set_legend({"none": True})
         _style(donut)
@@ -969,8 +963,8 @@ def build_workbook(
         sw.conditional_format(UDS, 2, UTR - 1, 2, {
             "type":             "data_bar",
             "data_bar_2010":    True,
-            "bar_color":        "#2E75B6",
-            "bar_border_color": "#1F3864",
+            "bar_color":        "#60A5FA",
+            "bar_border_color": MIDBLUE,
             "bar_solid":        True,
             "min_type":         "num",
             "min_value":        0,
@@ -995,23 +989,23 @@ def build_workbook(
                 "value":    True,
                 "position": "inside_end",
                 "font":     {"bold": True, "size": 9, "color": WHITE,
-                             "name": "Arial"},
+                             "name": "Calibri"},
             },
         })
         bar3.set_title({
             "name":      f"Incidents Closed by User  ·  Total: {sum(user_counts):,}",
             "name_font": {"bold": True, "size": 11, "color": NAVY,
-                          "name": "Arial"},
+                          "name": "Calibri"},
         })
         bar3.set_legend({"none": True})
         bar3.set_x_axis({
-            "num_font":        {"size": 9, "color": "#595959"},
+            "num_font":        {"size": 9, "color": SUBTLE},
             "major_gridlines": {
                 "visible": True,
-                "line":    {"color": "#EBEBEB", "width": 0.6,
+                "line":    {"color": "#E5E7EB", "width": 0.6,
                             "dash_type": "dash"},
             },
-            "line":       {"color": "#BFBFBF"},
+            "line":       {"color": "#E5E7EB"},
             "num_format": "0",
             "min":        0,
         })
