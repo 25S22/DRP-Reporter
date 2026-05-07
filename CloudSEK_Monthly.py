@@ -380,10 +380,118 @@ def extract_emails_closed_resolved(processed_raw, sheet_names):
 # ---------------------------------------------------------------------------
 # STEP 4 — BUILD OUTPUT WORKBOOK
 # ---------------------------------------------------------------------------
+def _progress_bar(pct, width=15):
+    """Returns a Unicode block-char progress strip  e.g. '██████░░░░░░░░░  40%'"""
+    filled = round(min(max(float(pct), 0.0), 100.0) / 100.0 * width)
+    return "█" * filled + "░" * (width - filled) + f"   {pct:.0f}%"
 
+
+def _add_insights_panel(sw, wb, cursor,
+                         mods_sorted, union_count_map, union_module_status,
+                         res_rate, user_names, user_counts,
+                         NAVY, WHITE):
+    """
+    Writes a 4-box insight strip starting at `cursor`.
+    Each box: coloured icon header | bold metric | italic subtitle | thin accent.
+    Returns the next free row after the panel.
+    """
+ 
+    def _f(**kw):
+        base = {"font_name": "Arial", "font_size": 10, "valign": "vcenter"}
+        base.update(kw)
+        return wb.add_format(base)
+ 
+    # ── Compute four insight values ───────────────────────────────────────────
+    most_mod = mods_sorted[0] if mods_sorted else "—"
+    most_cnt = union_count_map.get(most_mod, 0)
+ 
+    if   res_rate >= 80: rate_h, rate_b, rate_s = "#375623", "#E2EFDA", "✓  ON TARGET"
+    elif res_rate >= 60: rate_h, rate_b, rate_s = "#7F6000", "#FFF2CC", "~  NEEDS ATTENTION"
+    else:                rate_h, rate_b, rate_s = "#9C0006", "#FFC7CE", "✗  BELOW TARGET"
+ 
+    risk_mod = "—"; risk_cnt = 0
+    for m in mods_sorted:
+        n = union_module_status.get(m, {}).get("Open", 0)
+        if n > risk_cnt:
+            risk_cnt = n; risk_mod = m
+ 
+    top_u = user_names[0]  if user_names  else "—"
+    top_c = user_counts[0] if user_counts else 0
+ 
+    boxes = [
+        {
+            "icon": "◆  MOST IMPACTED MODULE",
+            "val":  most_mod[:24],
+            "sub":  f"{most_cnt:,} incidents in period",
+            "h": "#2E75B6", "b": "#DEEAF1", "t": "#1F3864",
+        },
+        {
+            "icon": "●  RESOLUTION HEALTH",
+            "val":  f"{res_rate:.1f}%",
+            "sub":  rate_s,
+            "h": rate_h, "b": rate_b, "t": rate_h,
+        },
+        {
+            "icon": "▲  BIGGEST OPEN RISK",
+            "val":  risk_mod[:24] if risk_cnt else "None  —  All Clear!",
+            "sub":  f"{risk_cnt:,} open incidents" if risk_cnt else "✓  Zero open incidents",
+            "h": "#9C0006" if risk_cnt else "#375623",
+            "b": "#FFC7CE" if risk_cnt else "#E2EFDA",
+            "t": "#9C0006" if risk_cnt else "#375623",
+        },
+        {
+            "icon": "★  TOP RESOLVER",
+            "val":  top_u[:24],
+            "sub":  f"{top_c:,} incidents closed",
+            "h": "#7030A0", "b": "#EAE0F1", "t": "#4B2878",
+        },
+    ]
+ 
+    # ── Section label ─────────────────────────────────────────────────────────
+    sw.set_row(cursor, 14)
+    sw.merge_range(cursor, 0, cursor, 11,
+                   "  KEY INSIGHTS  —  AUTO-GENERATED FROM PERIOD DATA",
+                   _f(bold=True, font_size=9, font_color="#595959", italic=True,
+                      bg_color="#F5F5F5", align="left",
+                      left=5, left_color="#2E75B6", top=1, bottom=1,
+                      top_color="#BFBFBF", bottom_color="#BFBFBF"))
+    cursor += 1
+ 
+    BOX_W = 3
+    sw.set_row(cursor,     18)   # icon header row
+    sw.set_row(cursor + 1, 38)   # big metric row
+    sw.set_row(cursor + 2, 14)   # subtitle row
+    sw.set_row(cursor + 3,  4)   # thin accent strip
+ 
+    for bi, bx in enumerate(boxes):
+        c1 = bi * BOX_W;  c2 = c1 + BOX_W - 1
+ 
+        # Icon / header band
+        sw.merge_range(cursor, c1, cursor, c2, bx["icon"],
+                       _f(bold=True, font_size=8, font_color=WHITE,
+                          bg_color=bx["h"], align="center",
+                          border=1, top=2, top_color=bx["h"]))
+ 
+        # Large metric value
+        sw.merge_range(cursor + 1, c1, cursor + 1, c2, bx["val"],
+                       _f(bold=True, font_size=16, font_color=bx["t"],
+                          bg_color=bx["b"], align="center", border=1))
+ 
+        # Italic subtitle
+        sw.merge_range(cursor + 2, c1, cursor + 2, c2, bx["sub"],
+                       _f(font_size=8, italic=True, font_color="#595959",
+                          bg_color=bx["b"], align="center", border=1))
+ 
+        # Thin bottom accent strip (same colour as header)
+        sw.merge_range(cursor + 3, c1, cursor + 3, c2, "",
+                       _f(bg_color=bx["h"]))
+ 
+    return cursor + 5   # 4 content rows + 1 blank spacer row
+
+ 
 def build_workbook(
     union_module_names,        union_module_counts,
-    union_module_status,       # {module: {Closed, In Progress, Open}}
+    union_module_status,
     union_status_labels,       union_status_counts,
     status_labels,             status_counts,
     user_names,                user_counts,
@@ -394,63 +502,62 @@ def build_workbook(
     start_dt, end_dt,
     output_path,
 ):
+    import xlsxwriter
+    import pandas as pd
+    from datetime import datetime
+ 
     wb = xlsxwriter.Workbook(output_path)
-
+ 
     # ── COLOUR TOKENS ────────────────────────────────────────────────────────
     NAVY    = "#1F3864"
     MIDBLUE = "#2E75B6"
-    LTBLUE  = "#D6E4F7"
+    LTBLUE  = "#DEEAF1"
     D_GREEN = "#375623"
     LTGREEN = "#E2EFDA"
     D_PURP  = "#4B2878"
     LTPURP  = "#EAE0F1"
-    ALT     = "#EFF5FB"
+    ALT     = "#F2F8FD"
     WHITE   = "#FFFFFF"
-
-    # Status palette (RAG)
-    CLR_CLOSED  = "#70AD47"   # green
-    CLR_INPROG  = "#FFC000"   # amber
-    CLR_OPEN    = "#C00000"   # red
-    CLR_CLOSED_D = "#375623"  # dark green text
-    CLR_INPROG_D = "#7F6000"  # dark amber text
-    CLR_OPEN_D   = "#9C0006"  # dark red text
-
+    OFFWHITE = "#FAFAFA"
+ 
+    CLR_CLOSED  = "#70AD47"
+    CLR_INPROG  = "#FFC000"
+    CLR_OPEN    = "#C00000"
+    CLR_CLOSED_D = "#375623"
+    CLR_INPROG_D = "#7F6000"
+    CLR_OPEN_D   = "#9C0006"
+ 
     # ── KPI CALCULATIONS ─────────────────────────────────────────────────────
-    total_union   = sum(union_module_counts) if union_module_counts else 0
-
-    closed_cnt    = next((c for l, c in zip(union_status_labels, union_status_counts)
-                          if l == "Closed"), 0)
-    inprog_cnt    = next((c for l, c in zip(union_status_labels, union_status_counts)
-                          if l == "In Progress"), 0)
-    open_cnt      = next((c for l, c in zip(union_status_labels, union_status_counts)
-                          if l == "Open"), 0)
-
-    _denom        = total_union or 1
-    res_rate      = closed_cnt / _denom * 100
-    pend_pct      = (open_cnt + inprog_cnt) / _denom * 100
-
-    def _rag(value, g_thresh, a_thresh, higher_is_better=True):
-        if higher_is_better:
-            if value >= g_thresh: return D_GREEN, LTGREEN, CLR_CLOSED
-            if value >= a_thresh: return "#7F6000", "#FFF2CC", CLR_INPROG
-            return "#9C0006",  "#FFC7CE", CLR_OPEN
+    total_union  = sum(union_module_counts) if union_module_counts else 0
+    closed_cnt   = next((c for l, c in zip(union_status_labels, union_status_counts)
+                         if l == "Closed"),      0)
+    inprog_cnt   = next((c for l, c in zip(union_status_labels, union_status_counts)
+                         if l == "In Progress"), 0)
+    open_cnt     = next((c for l, c in zip(union_status_labels, union_status_counts)
+                         if l == "Open"),        0)
+    _d         = total_union or 1
+    res_rate   = closed_cnt  / _d * 100
+    pend_pct   = (open_cnt + inprog_cnt) / _d * 100
+ 
+    def _rag_colors(value, g, a, higher=True):
+        if higher:
+            if value >= g: return D_GREEN,     LTGREEN,  CLR_CLOSED
+            if value >= a: return CLR_INPROG_D, "#FFF2CC", CLR_INPROG
+            return CLR_OPEN_D, "#FFC7CE", CLR_OPEN
         else:
-            if value <= g_thresh: return D_GREEN, LTGREEN, CLR_CLOSED
-            if value <= a_thresh: return "#7F6000", "#FFF2CC", CLR_INPROG
-            return "#9C0006",  "#FFC7CE", CLR_OPEN
-
-    rate_hdr, rate_bg, rate_bar = _rag(res_rate, 80, 60, higher_is_better=True)
-    pend_hdr, pend_bg, pend_bar = _rag(pend_pct, 10, 25, higher_is_better=False)
-
+            if value <= g: return D_GREEN,     LTGREEN,  CLR_CLOSED
+            if value <= a: return CLR_INPROG_D, "#FFF2CC", CLR_INPROG
+            return CLR_OPEN_D, "#FFC7CE", CLR_OPEN
+ 
+    rate_hdr, rate_bg, _ = _rag_colors(res_rate, 80, 60, higher=True)
+    pend_hdr, pend_bg, _ = _rag_colors(pend_pct, 10, 25, higher=False)
+ 
     # ── FORMAT FACTORY ───────────────────────────────────────────────────────
     def _f(**kw):
         base = {"font_name": "Arial", "font_size": 10, "valign": "vcenter"}
         base.update(kw)
         return wb.add_format(base)
-
-    f_banner    = _f(bold=True, font_size=15, font_color=WHITE,
-                     bg_color=NAVY, align="center")
-    f_section   = _f(bold=True, font_size=13, font_color=NAVY)
+ 
     f_num       = _f(align="center", border=1)
     f_lft       = _f(align="left",   border=1)
     f_num_alt   = _f(align="center", border=1, bg_color=ALT)
@@ -462,145 +569,208 @@ def build_workbook(
     f_date      = _f(align="left",  border=1, num_format="dd mmm yyyy")
     f_date_alt  = _f(align="left",  border=1, bg_color=ALT,
                      num_format="dd mmm yyyy")
-
+ 
+    # Section heading — left accent bar effect
+    f_section = _f(bold=True, font_size=12, font_color=NAVY,
+                   left=5, left_color=MIDBLUE, bg_color=WHITE)
+ 
     def _hdr(bg):
         return _f(bold=True, font_size=11, font_color=WHITE,
                   bg_color=bg, align="center", border=1)
     def _tot(fg, bg):
         return _f(bold=True, font_size=11, font_color=fg,
                   bg_color=bg, align="center", border=2)
-
-    f_hdr_purp  = _hdr(D_PURP);  f_tot_purp  = _tot(D_PURP,  LTPURP)
-    f_hdr_navy  = _hdr(NAVY);    f_tot_navy  = _tot(NAVY,    LTBLUE)
-
+ 
+    f_hdr_purp = _hdr(D_PURP);  f_tot_purp = _tot(D_PURP, LTPURP)
+    f_hdr_navy = _hdr(NAVY);    f_tot_navy = _tot(NAVY,   LTBLUE)
+ 
     # ── HIDDEN CHART-DATA SHEET ───────────────────────────────────────────────
-    # Sorted by total union count descending (worst module first).
+    # Sorted by union count descending — worst module at top of every chart.
     # Layout:
-    #   A  = module name
-    #   B  = Closed count     (green bar segment)
-    #   C  = In Progress count (amber bar segment)
-    #   D  = Open count       (red bar segment)
-    #   F  = overall status label (for donut)
-    #   G  = overall status count
-    #   I  = union status label
-    #   J  = union status count
-    #   L  = user name
-    #   M  = user count
-
+    #   A  module name          F  overall status label    K  user name
+    #   B  Closed count         G  overall status count    L  user count
+    #   C  In Progress count    I  union status label
+    #   D  Open count           J  union status count
+ 
     CDSHEET = "_ChartData"
-    cd      = wb.add_worksheet(CDSHEET)
+    cd = wb.add_worksheet(CDSHEET)
     cd.hide()
-
-    # Sort modules by union count descending
+ 
+    union_count_map = dict(zip(union_module_names, union_module_counts))
     mods_sorted = sorted(
         union_module_names,
-        key=lambda m: union_module_counts[list(union_module_names).index(m)],
+        key=lambda m: union_count_map.get(m, 0),
         reverse=True,
     )
     NM = len(mods_sorted)
-
-    union_count_map  = dict(zip(union_module_names, union_module_counts))
-
+ 
     for i, m in enumerate(mods_sorted):
-        sb  = union_module_status.get(m, {"Closed": 0, "In Progress": 0, "Open": 0})
-        cd.write(i, 0, m)                      # A: module
-        cd.write(i, 1, sb.get("Closed", 0))    # B: closed
-        cd.write(i, 2, sb.get("In Progress", 0))  # C: in progress
-        cd.write(i, 3, sb.get("Open", 0))      # D: open
-
-    # Col F-G: overall status (for donut on all data)
+        sb = union_module_status.get(m, {"Closed": 0, "In Progress": 0, "Open": 0})
+        cd.write(i, 0, m)
+        cd.write(i, 1, sb.get("Closed", 0))
+        cd.write(i, 2, sb.get("In Progress", 0))
+        cd.write(i, 3, sb.get("Open", 0))
+ 
     NS = len(status_labels)
-    for i, (lbl, cnt) in enumerate(zip(status_labels, status_counts)):
-        cd.write(i, 5, lbl)
-        cd.write(i, 6, cnt)
-
-    # Col I-J: union status
-    for i, (lbl, cnt) in enumerate(zip(union_status_labels, union_status_counts)):
-        cd.write(i, 8, lbl)
-        cd.write(i, 9, cnt)
-
-    # Col L-M: user
+    for i, (l, c) in enumerate(zip(status_labels, status_counts)):
+        cd.write(i, 5, l);  cd.write(i, 6, c)
+ 
+    NS_U = len(union_status_labels)
+    for i, (l, c) in enumerate(zip(union_status_labels, union_status_counts)):
+        cd.write(i, 8, l);  cd.write(i, 9, c)
+ 
     NU = len(user_names)
     for i, (u, c) in enumerate(zip(user_names, user_counts)):
-        cd.write(i, 11, u)
-        cd.write(i, 12, c)
-
+        cd.write(i, 11, u);  cd.write(i, 12, c)
+ 
     # ── SUMMARY SHEET ─────────────────────────────────────────────────────────
     sw = wb.add_worksheet(SUMMARY_SHEET_NAME)
-    sw.set_column(0, 0,  6)
-    sw.set_column(1, 1, 52)
-    sw.set_column(2, 2, 28)
-
-    # Row 0 — banner
-    sw.set_row(0, 42)
-    sw.merge_range(
-        0, 0, 0, 14,
-        f"Incident Summary Dashboard  |  "
-        f"{start_dt.strftime('%d %b %Y')}  to  {end_dt.strftime('%d %b %Y')}",
-        f_banner,
-    )
-
-    # ── KPI SCORECARD (rows 2-4) ──────────────────────────────────────────────
-    # Four boxes: Total in Period | Closed | In Progress | Open/Pending
-    KPI_TOP = 2
-    BOX_W   = 3    # columns per box
-
+    sw.set_zoom(90)
+    sw.set_column(0,  0,   6)
+    sw.set_column(1,  1,  52)
+    sw.set_column(2,  2,  20)
+    sw.set_column(3, 14,   9)
+ 
+    # ── BANNER (2 rows) ───────────────────────────────────────────────────────
+    #   Row 0: bold dark title
+    #   Row 1: lighter subtitle with period and generated date
+ 
+    sw.set_row(0, 40)
+    sw.merge_range(0, 0, 0, 14,
+                   "  INCIDENT SUMMARY DASHBOARD",
+                   _f(bold=True, font_size=20, font_color=WHITE,
+                      bg_color=NAVY, align="left", valign="vcenter"))
+ 
+    sw.set_row(1, 20)
+    sw.merge_range(1, 0, 1, 14,
+                   f"  Reporting Period:  "
+                   f"{start_dt.strftime('%d %b %Y')}  ─  {end_dt.strftime('%d %b %Y')}"
+                   f"     │     Generated: {datetime.now().strftime('%d %b %Y, %H:%M')}",
+                   _f(font_size=10, font_color="#D6E4F7", italic=True,
+                      bg_color=MIDBLUE, align="left", valign="vcenter"))
+ 
+    sw.set_row(2, 8)    # breathing gap below banner
+ 
+    # ── KPI SCORECARD (rows 3-7) ──────────────────────────────────────────────
+    #   Row 3: small label header
+    #   Row 4: large number
+    #   Row 5: subtitle + progress bar
+    #   Row 6: ultra-thin accent strip
+    #   Row 7: breathing gap
+ 
+    KPI_TOP = 3
+    BOX_W   = 3
+ 
     kpi = [
         ("TOTAL IN PERIOD",   str(total_union),
-         "Unique incidents (union)",         NAVY,     LTBLUE),
+         _progress_bar(100, 15),
+         NAVY, LTBLUE),
         ("CLOSED",            str(closed_cnt),
-         f"{res_rate:.1f}% resolution rate", rate_hdr, rate_bg),
+         _progress_bar(res_rate),
+         rate_hdr, rate_bg),
         ("IN PROGRESS",       str(inprog_cnt),
-         "Still being worked",               CLR_INPROG_D, "#FFF2CC"),
+         _progress_bar(inprog_cnt / _d * 100),
+         CLR_INPROG_D, "#FFF2CC"),
         ("OPEN / PENDING",    str(open_cnt),
-         f"{pend_pct:.1f}% of period total", pend_hdr, pend_bg),
+         _progress_bar(pend_pct),
+         pend_hdr, pend_bg),
     ]
-
-    sw.set_row(KPI_TOP,     18)
-    sw.set_row(KPI_TOP + 1, 40)
-    sw.set_row(KPI_TOP + 2, 16)
-
-    for bi, (label, value, subtitle, hdr_c, bg_c) in enumerate(kpi):
+ 
+    sw.set_row(KPI_TOP,     16)   # label row
+    sw.set_row(KPI_TOP + 1, 46)   # BIG number row
+    sw.set_row(KPI_TOP + 2, 18)   # progress bar row
+    sw.set_row(KPI_TOP + 3,  4)   # thin accent strip
+    sw.set_row(KPI_TOP + 4,  8)   # gap
+ 
+    for bi, (label, value, progbar, hdr_c, bg_c) in enumerate(kpi):
         c1 = bi * BOX_W;  c2 = c1 + BOX_W - 1
-        sw.merge_range(KPI_TOP,     c1, KPI_TOP,     c2, label,
+ 
+        # Label header
+        sw.merge_range(KPI_TOP, c1, KPI_TOP, c2, label,
                        _f(bold=True, font_size=9, font_color=WHITE,
                           bg_color=hdr_c, align="center", border=1))
+ 
+        # Large number
         sw.merge_range(KPI_TOP + 1, c1, KPI_TOP + 1, c2, value,
-                       _f(bold=True, font_size=22, font_color=hdr_c,
-                          bg_color=bg_c, align="center", border=1))
-        sw.merge_range(KPI_TOP + 2, c1, KPI_TOP + 2, c2, subtitle,
-                       _f(font_size=8, font_color="#595959", italic=True,
-                          bg_color=bg_c, align="center", border=1))
-
-    cursor = KPI_TOP + 4
-
-    # ── UNION TABLE (③) ───────────────────────────────────────────────────────
+                       _f(bold=True, font_size=26, font_color=hdr_c,
+                          bg_color=bg_c, align="center",
+                          left=1, right=1, top=0, bottom=0))
+ 
+        # Progress bar row
+        sw.merge_range(KPI_TOP + 2, c1, KPI_TOP + 2, c2, progbar,
+                       _f(font_size=8, font_color=hdr_c, bold=True,
+                          bg_color=bg_c, align="center",
+                          left=1, right=1, top=0, bottom=0,
+                          font_name="Courier New"))   # monospace for block chars
+ 
+        # Thin accent strip  (solid colour = visual "bottom border")
+        sw.merge_range(KPI_TOP + 3, c1, KPI_TOP + 3, c2, "",
+                       _f(bg_color=hdr_c))
+ 
+    # Freeze everything above the insights panel
+    sw.freeze_panes(KPI_TOP + 5, 0)
+ 
+    cursor = KPI_TOP + 5   # row 8 — start of scrollable content
+ 
+    # ── THIN SECTION DIVIDER ──────────────────────────────────────────────────
+    def _divider(row, color=MIDBLUE):
+        sw.set_row(row, 3)
+        sw.merge_range(row, 0, row, 14, "", _f(bg_color=color))
+ 
+    # ── INSIGHTS PANEL ────────────────────────────────────────────────────────
+    cursor = _add_insights_panel(
+        sw, wb, cursor,
+        mods_sorted, union_count_map, union_module_status,
+        res_rate, user_names, user_counts,
+        NAVY, WHITE,
+    )
+ 
+    _divider(cursor);  cursor += 1
+ 
+    # ── MODULE TABLE (union) ──────────────────────────────────────────────────
     if union_module_names:
-        sw.set_row(cursor, 24)
+        sw.set_row(cursor, 26)
         sw.write(cursor, 0,
-                 "Incidents in Period — Module-wise  (Created OR Closed in Range)",
+                 "  Incidents in Period  —  Module-wise  (Created OR Closed in Range)",
                  f_section)
-        UHDR = cursor + 1;  UDS = UHDR + 1;  UTR = UDS + NM
-        sw.set_row(UHDR, 22)
+        HDR = cursor + 1;  DS = HDR + 1;  TR = DS + NM
+ 
+        sw.set_row(HDR, 24)
         for ci, h in enumerate(["#", "Module Name", "Unique Incidents"]):
-            sw.write(UHDR, ci, h, f_hdr_purp)
+            sw.write(HDR, ci, h, f_hdr_purp)
+ 
         for i, m in enumerate(mods_sorted):
-            r   = UDS + i;  alt = (i % 2 == 1)
+            r = DS + i;  alt = (i % 2 == 1)
             sw.set_row(r, 18)
-            sw.write(r, 0, i + 1, f_num_alt if alt else f_num)
-            sw.write(r, 1, m,     f_lft_alt if alt else f_lft)
-            sw.write(r, 2, union_count_map.get(m, 0),
-                     f_num_alt if alt else f_num)
-        sw.set_row(UTR, 22)
-        sw.merge_range(UTR, 0, UTR, 1, "TOTAL", f_tot_purp)
-        sw.write_formula(UTR, 2, f"=SUM(C{UDS+1}:C{UDS+NM})", f_tot_purp)
-        cursor = UTR + 2
-
+            sw.write(r, 0, i + 1,                f_num_alt if alt else f_num)
+            sw.write(r, 1, m,                    f_lft_alt if alt else f_lft)
+            sw.write(r, 2, union_count_map[m],   f_num_alt if alt else f_num)
+ 
+        # ── Data bar on count column ──────────────────────────────────────────
+        sw.conditional_format(DS, 2, TR - 1, 2, {
+            "type":             "data_bar",
+            "data_bar_2010":    True,
+            "bar_color":        "#4472C4",
+            "bar_border_color": "#2E75B6",
+            "bar_solid":        True,
+            "min_type":         "num",
+            "min_value":        0,
+            "bar_direction":    "left",
+        })
+ 
+        sw.set_row(TR, 24)
+        sw.merge_range(TR, 0, TR, 1, "TOTAL", f_tot_purp)
+        sw.write_formula(TR, 2, f"=SUM(C{DS+1}:C{DS+NM})", f_tot_purp)
+        cursor = TR + 2
+ 
     # ── UNION STATUS MINI-TABLE ───────────────────────────────────────────────
+    _STATUS_RAG = {"Open": "#C00000", "In Progress": "#FFC000", "Closed": "#70AD47"}
+ 
     if union_status_labels:
-        sw.set_row(cursor, 20)
+        sw.set_row(cursor, 26)
         sw.write(cursor, 0,
-                 "Current Status Breakdown — All Incidents in Period", f_section)
+                 "  Current Status Breakdown  —  All Incidents in Period",
+                 f_section)
         cursor += 1
         for ci, h in enumerate(["Status", "Count", "% Share"]):
             sw.write(cursor, ci, h, f_hdr_purp)
@@ -609,106 +779,136 @@ def build_workbook(
         for lbl, cnt in zip(union_status_labels, union_status_counts):
             bg = _STATUS_RAG.get(lbl, ALT)
             sw.write(cursor, 0, lbl,
-                     _f(bold=True, align="left",   border=1, bg_color=bg))
+                     _f(bold=True, align="left",   border=1, bg_color=bg,
+                        font_color=WHITE))
             sw.write(cursor, 1, cnt,
-                     _f(align="center", border=1, bg_color=bg))
+                     _f(bold=True, align="center", border=1, bg_color=bg,
+                        font_color=WHITE))
             sw.write(cursor, 2, cnt / total_u,
-                     _f(align="center", border=1, bg_color=bg, num_format="0.0%"))
+                     _f(align="center", border=1, bg_color=bg,
+                        num_format="0.0%", font_color=WHITE))
             cursor += 1
         cursor += 1
-
-    sw.freeze_panes(KPI_TOP + 3, 0)
-
+ 
+    _divider(cursor);  cursor += 1
+ 
     # ── CHART SECTION ─────────────────────────────────────────────────────────
-    cursor += 1
     sw.set_row(cursor, 22)
-    sw.write(cursor, 0, "Visual Summary", f_section)
+    sw.write(cursor, 0, "  Visual Summary", f_section)
     cursor += 1
     CHART_ROW = cursor
-
+ 
+    # Shared chart polish helper
     def _style(chart):
-        chart.set_plotarea({"border": {"none": True}})
-        chart.set_chartarea({"border": {"color": "#D9D9D9"},
-                             "fill":   {"color": WHITE}})
+        chart.set_plotarea({
+            "border": {"none": True},
+            "fill":   {"color": OFFWHITE},
+        })
+        chart.set_chartarea({
+            "border": {"color": "#D0D0D0", "width": 0.5},
+            "fill":   {"color": WHITE},
+        })
         chart.set_style(2)
-
-    # ── CHART 1: Stacked horizontal bar — union per module, split by status ──
-    # Each module bar = total union incidents.
-    # Segments: Closed (green) | In Progress (amber) | Open (red)
-    # Sorted worst→best so problem modules are at top.
+ 
+    # ── CHART 1 — Stacked horizontal bar: Union per module split by status ────
+    #
+    # The biggest single visual upgrade is set_gap(50):
+    #   default gap = 150 % of bar width → bars look thin and "airy"
+    #   gap = 50 → bars are 3× thicker — immediately more impactful
+    #
+    # Segment order: Closed (green, left) | In Progress (amber) | Open (red)
+    # Each segment carries a bold white data label with the exact count.
+    # Modules sorted worst → best so the most-impacted row is at the top.
+ 
     if NM > 0:
-        bar_h = max(360, NM * 38 + 120)
-        bar_w = 700
-
+        bar_h = max(380, NM * 42 + 130)
+        bar_w = 680
+ 
         stacked = wb.add_chart({"type": "bar", "subtype": "stacked"})
-
-        # Series 1: Closed — green (bottom/left segment, most positive)
+        stacked.set_gap(50)         # ← FAT bars — single biggest visual impact
+ 
+        # Series: Closed (green)
         stacked.add_series({
             "name":       "Closed",
-            "categories": [CDSHEET, 0, 0, NM - 1, 0],   # col A: module
-            "values":     [CDSHEET, 0, 1, NM - 1, 1],   # col B: closed
+            "categories": [CDSHEET, 0, 0, NM - 1, 0],
+            "values":     [CDSHEET, 0, 1, NM - 1, 1],
             "fill":       {"color": CLR_CLOSED},
-            "border":     {"color": WHITE, "width": 0.75},
+            "border":     {"color": WHITE, "width": 1.0},
             "data_labels": {
                 "value":    True,
                 "position": "inside_end",
-                "font":     {"bold": True, "size": 9, "color": WHITE},
+                "font":     {"bold": True, "size": 9, "color": WHITE,
+                             "name": "Arial"},
             },
         })
-        # Series 2: In Progress — amber
+        # Series: In Progress (amber)
         stacked.add_series({
             "name":       "In Progress",
             "categories": [CDSHEET, 0, 0, NM - 1, 0],
-            "values":     [CDSHEET, 0, 2, NM - 1, 2],   # col C: in progress
+            "values":     [CDSHEET, 0, 2, NM - 1, 2],
             "fill":       {"color": CLR_INPROG},
-            "border":     {"color": WHITE, "width": 0.75},
+            "border":     {"color": WHITE, "width": 1.0},
             "data_labels": {
                 "value":    True,
                 "position": "inside_end",
-                "font":     {"bold": True, "size": 9, "color": "#3A3A3A"},
+                "font":     {"bold": True, "size": 9, "color": "#3A3A3A",
+                             "name": "Arial"},
             },
         })
-        # Series 3: Open — red (signals unresolved risk)
+        # Series: Open (red — signals unresolved risk)
         stacked.add_series({
             "name":       "Open",
             "categories": [CDSHEET, 0, 0, NM - 1, 0],
-            "values":     [CDSHEET, 0, 3, NM - 1, 3],   # col D: open
+            "values":     [CDSHEET, 0, 3, NM - 1, 3],
             "fill":       {"color": CLR_OPEN},
-            "border":     {"color": WHITE, "width": 0.75},
+            "border":     {"color": WHITE, "width": 1.0},
             "data_labels": {
                 "value":    True,
                 "position": "inside_end",
-                "font":     {"bold": True, "size": 9, "color": WHITE},
+                "font":     {"bold": True, "size": 9, "color": WHITE,
+                             "name": "Arial"},
             },
         })
-
+ 
         stacked.set_title({
-            "name": (
-                f"Incidents by Module — Period Total: {total_union}  "
-                f"│  ■ Closed  ■ In Progress  ■ Open"
-            ),
-            "name_font": {"bold": True, "size": 12, "color": NAVY},
+            "name":      f"Incidents by Module  ·  Period Total: {total_union:,}",
+            "name_font": {"bold": True, "size": 12, "color": NAVY,
+                          "name": "Arial"},
         })
         stacked.set_legend({
-            "position":  "bottom",
-            "font":      {"bold": True, "size": 10},
+            "position": "bottom",
+            "font":     {"bold": True, "size": 10, "color": "#404040",
+                         "name": "Arial"},
+            "border":   {"color": "#E0E0E0"},
+            "fill":     {"color": "#F9F9F9"},
         })
         stacked.set_x_axis({
-            "num_font":        {"size": 9},
-            "major_gridlines": {"visible": True,
-                                "line":    {"color": "#E0E0E0", "width": 0.5}},
-            "minor_gridlines": {"visible": False},
+            "num_font":        {"size": 9, "color": "#595959"},
+            "major_gridlines": {
+                "visible": True,
+                "line":    {"color": "#EBEBEB", "width": 0.6,
+                            "dash_type": "dash"},
+            },
+            "line":            {"color": "#BFBFBF"},
+            "num_format":      "0",
+            "min":             0,
         })
         stacked.set_y_axis({
-            "num_font": {"size": 10, "bold": True},
-            "line":     {"none": True},
+            "num_font":        {"size": 10, "bold": True, "color": NAVY},
+            "line":            {"none": True},
+            "major_tick_mark": "none",
+            "major_gridlines": {"visible": False},
         })
         _style(stacked)
         stacked.set_size({"width": bar_w, "height": bar_h})
         sw.insert_chart(CHART_ROW, 0, stacked, {"x_offset": 5, "y_offset": 5})
-
-    # ── CHART 2: Donut — union status (period incidents only) ────────────────
-    NS_U = len(union_status_labels)
+ 
+    # ── CHART 2 — Donut: status mix for union incidents ───────────────────────
+    #
+    # RAG colours (red/amber/green) encode health at a glance.
+    # Category + value + percentage on each slice — no legend needed.
+    # Total shown in title so stakeholders never need to sum slices.
+ 
     if NS_U > 0:
         donut = wb.add_chart({"type": "doughnut"})
         donut.add_series({
@@ -724,46 +924,67 @@ def build_workbook(
                 "category":   True,
                 "value":      True,
                 "separator":  "\n",
-                "font":       {"bold": True, "size": 9},
+                "font":       {"bold": True, "size": 9, "name": "Arial"},
             },
         })
         donut.set_title({
             "name": (
-                f"Status Mix — Period Incidents\n"
-                f"Total: {total_union} unique"
+                f"Period Status Mix\n"
+                f"Total: {total_union:,} unique incidents"
             ),
-            "name_font": {"bold": True, "size": 10, "color": NAVY},
+            "name_font": {"bold": True, "size": 10, "color": NAVY,
+                          "name": "Arial"},
         })
         donut.set_legend({"none": True})
         _style(donut)
-        donut.set_size({"width": 340, "height": 340})
-        # Place to the right of the stacked bar
+        donut.set_size({"width": 340, "height": 350})
+        # Positioned to the right of the stacked bar
         sw.insert_chart(CHART_ROW, 12, donut, {"x_offset": 5, "y_offset": 5})
-
-    chart_rows = max(NM * 3 + 6, 22)
+ 
+    chart_rows = max(NM * 3 + 8, 24)
     cursor     = CHART_ROW + chart_rows
-
+ 
+    _divider(cursor);  cursor += 1
+ 
     # ── USER TABLE + HORIZONTAL BAR ───────────────────────────────────────────
     if NU > 0:
-        cursor += 1
-        sw.set_row(cursor, 24)
+        sw.set_row(cursor, 26)
         sw.write(cursor, 0,
-                 "Incidents Closed By — User Wise (Closure Date Range)", f_section)
-        UHDR2 = cursor + 1;  UDS2 = UHDR2 + 1;  UTR2 = UDS2 + NU
-        sw.set_row(UHDR2, 22)
-        for ci, h in enumerate(["#", "Closed By", "Unique Incidents Closed"]):
-            sw.write(UHDR2, ci, h, f_hdr_navy)
+                 "  Incidents Closed By  —  User Wise  (Closure Date Range)",
+                 f_section)
+        UHDR = cursor + 1;  UDS = UHDR + 1;  UTR = UDS + NU
+ 
+        sw.set_row(UHDR, 24)
+        for ci, h in enumerate(["#", "Closed By", "Incidents Closed"]):
+            sw.write(UHDR, ci, h, f_hdr_navy)
+ 
         for i in range(NU):
-            r   = UDS2 + i;  alt = (i % 2 == 1)
+            r = UDS + i;  alt = (i % 2 == 1)
             sw.set_row(r, 18)
             sw.write(r, 0, i + 1,          f_num_alt if alt else f_num)
             sw.write(r, 1, user_names[i],  f_lft_alt if alt else f_lft)
             sw.write(r, 2, user_counts[i], f_num_alt if alt else f_num)
-        sw.set_row(UTR2, 22)
-        sw.merge_range(UTR2, 0, UTR2, 1, "TOTAL", f_tot_navy)
-        sw.write_formula(UTR2, 2, f"=SUM(C{UDS2+1}:C{UDS2+NU})", f_tot_navy)
-
+ 
+        # Data bar on user count column too
+        sw.conditional_format(UDS, 2, UTR - 1, 2, {
+            "type":             "data_bar",
+            "data_bar_2010":    True,
+            "bar_color":        "#2E75B6",
+            "bar_border_color": "#1F3864",
+            "bar_solid":        True,
+            "min_type":         "num",
+            "min_value":        0,
+            "bar_direction":    "left",
+        })
+ 
+        sw.set_row(UTR, 24)
+        sw.merge_range(UTR, 0, UTR, 1, "TOTAL", f_tot_navy)
+        sw.write_formula(UTR, 2, f"=SUM(C{UDS+1}:C{UDS+NU})", f_tot_navy)
+ 
+        # User bar chart — consistent with stacked bar palette
         bar3 = wb.add_chart({"type": "bar"})
+        bar3.set_gap(55)
+ 
         bar3.add_series({
             "name":       "Incidents Closed",
             "categories": [CDSHEET, 0, 11, NU - 1, 11],
@@ -773,31 +994,44 @@ def build_workbook(
             "data_labels": {
                 "value":    True,
                 "position": "inside_end",
-                "font":     {"bold": True, "size": 9, "color": WHITE},
+                "font":     {"bold": True, "size": 9, "color": WHITE,
+                             "name": "Arial"},
             },
         })
         bar3.set_title({
-            "name":      f"Incidents Closed by User  (total: {sum(user_counts)})",
-            "name_font": {"bold": True, "size": 11, "color": NAVY},
+            "name":      f"Incidents Closed by User  ·  Total: {sum(user_counts):,}",
+            "name_font": {"bold": True, "size": 11, "color": NAVY,
+                          "name": "Arial"},
         })
         bar3.set_legend({"none": True})
-        bar3.set_x_axis({"num_font":       {"size": 9},
-                          "major_gridlines": {"visible": True,
-                                              "line":    {"color": "#E0E0E0",
-                                                          "width": 0.5}}})
-        bar3.set_y_axis({"num_font": {"size": 10, "bold": True},
-                          "line":     {"none": True}})
+        bar3.set_x_axis({
+            "num_font":        {"size": 9, "color": "#595959"},
+            "major_gridlines": {
+                "visible": True,
+                "line":    {"color": "#EBEBEB", "width": 0.6,
+                            "dash_type": "dash"},
+            },
+            "line":       {"color": "#BFBFBF"},
+            "num_format": "0",
+            "min":        0,
+        })
+        bar3.set_y_axis({
+            "num_font":        {"size": 10, "bold": True, "color": NAVY},
+            "line":            {"none": True},
+            "major_tick_mark": "none",
+            "major_gridlines": {"visible": False},
+        })
         _style(bar3)
-        bar3.set_size({"width": 520, "height": max(300, NU * 30 + 120)})
-        sw.insert_chart(UTR2 + 2, 0, bar3, {"x_offset": 5, "y_offset": 5})
-
+        bar3.set_size({"width": 520, "height": max(300, NU * 32 + 120)})
+        sw.insert_chart(UTR + 2, 0, bar3, {"x_offset": 5, "y_offset": 5})
+ 
     # ── EMAIL SHEET ───────────────────────────────────────────────────────────
     if unique_emails:
         ew = wb.add_worksheet("Emails - Closed Resolved")
-        ew.set_row(0, 36)
+        ew.set_row(0, 38)
         ew.merge_range(
             0, 0, 0, 2,
-            f"Unique Emails — Closed - Resolved  |  {len(unique_emails)} addresses",
+            f"Unique Emails — Closed Resolved  │  {len(unique_emails):,} addresses",
             _f(bold=True, font_size=13, font_color=WHITE,
                bg_color=NAVY, align="center"),
         )
@@ -810,15 +1044,15 @@ def build_workbook(
         ew.set_column(1, 1, max(len(e) for e in unique_emails) + 6)
         ew.freeze_panes(3, 0)
         for i, email in enumerate(unique_emails):
-            r   = 3 + i;  alt = (i % 2 == 1)
-            bg  = ALT if alt else WHITE
+            r  = 3 + i;  alt = (i % 2 == 1)
+            bg = ALT if alt else WHITE
             ew.set_row(r, 16)
             ew.write(r, 0, i + 1, _f(align="center", border=1, bg_color=bg))
             ew.write(r, 1, email,  _f(align="left",   border=1, bg_color=bg))
-
+ 
     # ── U (UNION) DATA SHEETS ONLY ────────────────────────────────────────────
     date_cols = {c for c in [COL_CREATION_DATE, COL_CLOSURE_DATE] if c}
-
+ 
     def _write_data_sheet(ws_name, df):
         if df is None or df.empty:
             return
@@ -827,15 +1061,16 @@ def build_workbook(
         nc      = len(headers)
         nr      = len(df)
         di      = {i for i, h in enumerate(headers) if h in date_cols}
-
-        dw.set_default_row(16);  dw.set_row(0, 20)
+ 
+        dw.set_default_row(16)
+        dw.set_row(0, 22)
         for ci, h in enumerate(headers):
             dw.write(0, ci, h, f_data_hdr)
             dw.set_column(ci, ci, max(len(str(h)) + 4, 14))
-
+ 
         vals = df.values
         for ri in range(nr):
-            er  = ri + 1;  alt = (er % 2 == 0)
+            er = ri + 1;  alt = (er % 2 == 0)
             for ci in range(nc):
                 val = vals[ri, ci];  isd = (ci in di)
                 try:    nil = pd.isna(val)
@@ -850,15 +1085,14 @@ def build_workbook(
                                       f_date_alt if alt else f_date)
                 else:
                     dw.write(er, ci, val, f_cell_alt if alt else f_cell)
-
+ 
         dw.freeze_panes(1, 0)
         dw.autofilter(0, 0, nr, nc - 1)
-
-    # Write only U sheets (union: created OR closed in range)
+ 
     for name in sheet_names:
         if counts_union.get(name, 0) > 0:
             _write_data_sheet(f"U - {name[:25]}", filtered_union_raw.get(name))
-
+ 
     wb.close()
 
 # ---------------------------------------------------------------------------
