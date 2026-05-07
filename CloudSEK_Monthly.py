@@ -428,7 +428,7 @@ def _add_insights_panel(sw, wb, cursor,
     ]
  
     # ── Section label ─────────────────────────────────────────────────────────
-    BOX_W = 15  # single card spans full width
+    BOX_W = 15  # spans summary columns 0-14 (full-width insight card)
     INSIGHT_END  = BOX_W - 1
     sw.set_row(cursor, 16)
     sw.merge_range(cursor, 0, cursor, INSIGHT_END,
