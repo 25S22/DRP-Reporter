@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 ===============================================================================
  INCIDENT REPORT GENERATOR  ·  v3.0  ("strong build")
@@ -78,6 +80,7 @@ from datetime import datetime
 
 import pandas as pd
 import xlsxwriter
+from xlsxwriter.utility import xl_col_to_name
 from pandas.api.types import is_datetime64_any_dtype
 
 import warnings
@@ -157,37 +160,42 @@ SUMMARY_SHEET_NAME = "Summary Dashboard"
 DQ_SHEET_NAME      = "Data Quality"
 CDSHEET            = "_ChartData"
 
-NAVY     = "#111827"
-MIDBLUE  = "#2563EB"
-LTBLUE   = "#DBEAFE"
-D_GREEN  = "#065F46"
-LTGREEN  = "#D1FAE5"
-D_PURP   = "#6D28D9"
-LTPURP   = "#EDE9FE"
-ALT      = "#F3F4F6"
-WHITE    = "#FFFFFF"
-OFFWHITE = "#F9FAFB"
-SUBTLE   = "#4B5563"
-GREYLINE = "#E5E7EB"
+# --- design system -----------------------------------------------------------
+# One neutral slate ramp for structure, ONE accent (indigo) for anything
+# structural, and the RAG colours reserved strictly for status meaning. Keeping
+# semantic colour scarce is what stops a dashboard looking like a paint chart.
+INK       = "#0F172A"      # banner / darkest text
+SLATE     = "#334155"
+MUTED     = "#64748B"      # captions, axis text
+LINE      = "#E2E8F0"      # hairline borders
+LINE_SOFT = "#F1F5F9"      # zebra rows
+CANVAS    = "#F8FAFC"      # page background bands
+WHITE     = "#FFFFFF"
+ACCENT    = "#4F46E5"      # indigo - section rules, totals, data bars
+ACCENT_L  = "#EEF2FF"
+ACCENT_D  = "#3730A3"
 
-CLR_CLOSED   = "#22C55E"
-CLR_INPROG   = "#F59E0B"
-CLR_OPEN     = "#EF4444"
-CLR_OTHER    = "#94A3B8"
-CLR_CLOSED_D = "#15803D"
-CLR_INPROG_D = "#B45309"
-CLR_OPEN_D   = "#B91C1C"
+GREEN, GREEN_L, GREEN_D = "#16A34A", "#DCFCE7", "#15803D"
+AMBER, AMBER_L, AMBER_D = "#D97706", "#FEF3C7", "#B45309"
+RED,   RED_L,   RED_D   = "#DC2626", "#FEE2E2", "#B91C1C"
+GREY,  GREY_L,  GREY_D  = "#94A3B8", "#F1F5F9", "#475569"
 
-_STATUS_RAG = {
-    "Closed":      CLR_CLOSED,
-    "In Progress": CLR_INPROG,
-    "Open":        CLR_OPEN,
-    "Other":       CLR_OTHER,
-}
-_STATUS_LABEL_FG = {
-    "Closed": WHITE, "In Progress": NAVY, "Open": WHITE, "Other": WHITE,
-}
+_STATUS_RAG  = {"Closed": GREEN,   "In Progress": AMBER,
+                "Open": RED,       "Other": GREY}
+_STATUS_TINT = {"Closed": GREEN_L, "In Progress": AMBER_L,
+                "Open": RED_L,     "Other": GREY_L}
+_STATUS_DARK = {"Closed": GREEN_D, "In Progress": AMBER_D,
+                "Open": RED_D,     "Other": GREY_D}
 
+# --- dashboard grid ----------------------------------------------------------
+# A uniform 20-column grid (plus a gutter each side) is what makes the KPI row,
+# the insight row and the tables all line up on the same vertical rhythm.
+GUTTER   = 0          # narrow spacer column on the left
+C0       = 1          # first content column
+CN       = 20         # last content column
+COL_W    = 8.5        # ~64 px per column
+COL_PX   = 64
+GUT_W    = 2
 
 # =============================================================================
 # COLUMN NAME RESOLUTION
@@ -642,6 +650,14 @@ def build_metrics(master: pd.DataFrame, modules: list[str],
     trend_created = [int(cm.get(p, 0)) for p in months]
     trend_closed  = [int(km.get(p, 0)) for p in months]
 
+    # ALL-TIME status mix - every incident in the file, ignoring the date range
+    alltime = dedupe(master.copy())
+    avc = alltime["_Status"].value_counts()
+    alltime_labels = [x for x in STATUS_ORDER if int(avc.get(x, 0)) > 0]
+    alltime_counts = [int(avc.get(x, 0)) for x in alltime_labels]
+    alltime_total  = sum(alltime_counts)
+    alltime_backlog = int(avc.get("Open", 0)) + int(avc.get("In Progress", 0))
+
     # emails
     emails = extract_emails(master if EMAIL_SCOPE == "all" else union)
 
@@ -654,6 +670,8 @@ def build_metrics(master: pd.DataFrame, modules: list[str],
         "user_names": user_names, "user_counts": user_counts,
         "total_events": total_events,
         "mttr_mean": mttr_mean, "mttr_med": mttr_med,
+        "alltime_labels": alltime_labels, "alltime_counts": alltime_counts,
+        "alltime_total": alltime_total, "alltime_backlog": alltime_backlog,
         "trend_labels": trend_labels, "trend_created": trend_created,
         "trend_closed": trend_closed,
         "emails": emails, "total_union": total_union,
@@ -703,6 +721,10 @@ def reconcile(m: dict) -> None:
         flag = "PASS" if x == y else "FAIL"
         ok &= (x == y)
         print(f"    [{flag}] {label}   ({x:,} vs {y:,})")
+    at = sum(m["alltime_counts"])
+    print(f"    [{'PASS' if at == m['alltime_total'] else 'FAIL'}] "
+          f"all-time status total  == all-time rows   "
+          f"({at:,} vs {m['alltime_total']:,})")
     if m["user_counts"]:
         print(f"    [INFO] closed-by total {sum(m['user_counts']):,} of "
               f"{m['n_closed']:,} closed-in-period "
@@ -722,15 +744,6 @@ def _progress_bar(pct: float, width: int = 15) -> str:
     return "█" * filled + "░" * (width - filled) + f"   {pct:.0f}%"
 
 
-def _fmt_days(v) -> str:
-    if v is None:
-        return "n/a"
-    if v < 1:
-        h = v * 24
-        return f"{h:.1f} hrs"
-    return f"{v:.1f} days"
-
-
 def _rows_for(px: int, row_px: int = 20) -> int:
     return int(math.ceil(px / row_px)) + 2
 
@@ -739,48 +752,94 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
                    issues: list, start_dt, end_dt, output_path: str) -> None:
     wb = xlsxwriter.Workbook(output_path, {"nan_inf_to_errors": True})
 
-    def _f(**kw):
-        base = {"font_name": "Calibri", "font_size": 10, "valign": "vcenter"}
-        base.update(kw)
-        return wb.add_format(base)
-
-    f_num      = _f(align="center", border=1, border_color=GREYLINE, font_color=NAVY)
-    f_num_alt  = _f(align="center", border=1, border_color=GREYLINE, bg_color=ALT, font_color=NAVY)
-    f_lft      = _f(align="left", border=1, border_color=GREYLINE, font_color=NAVY)
-    f_lft_alt  = _f(align="left", border=1, border_color=GREYLINE, bg_color=ALT, font_color=NAVY)
-    f_pct      = _f(align="center", border=1, border_color=GREYLINE, num_format="0.0%", font_color=NAVY)
-    f_pct_alt  = _f(align="center", border=1, border_color=GREYLINE, num_format="0.0%", bg_color=ALT, font_color=NAVY)
-    f_data_hdr = _f(bold=True, font_color=WHITE, bg_color=MIDBLUE, align="center", border=1, border_color=MIDBLUE)
-    f_cell     = _f(align="left", border=1, border_color=GREYLINE, font_color=NAVY)
-    f_cell_alt = _f(align="left", border=1, border_color=GREYLINE, bg_color=ALT, font_color=NAVY)
-    f_date     = _f(align="left", border=1, border_color=GREYLINE, num_format="dd mmm yyyy hh:mm", font_color=NAVY)
-    f_date_alt = _f(align="left", border=1, border_color=GREYLINE, num_format="dd mmm yyyy hh:mm", bg_color=ALT, font_color=NAVY)
-    f_section  = _f(bold=True, font_size=12, font_color=NAVY, left=5, left_color=MIDBLUE, bg_color=OFFWHITE)
-
-    def _hdr(bg):
-        return _f(bold=True, font_size=11, font_color=WHITE, bg_color=bg,
-                  align="center", border=1, border_color=bg)
-
-    def _tot(fg, bg):
-        return _f(bold=True, font_size=11, font_color=fg, bg_color=bg,
-                  align="center", border=1, border_color=GREYLINE)
-
-    f_hdr_purp, f_tot_purp = _hdr(D_PURP), _tot(D_PURP, LTPURP)
-    f_hdr_navy, f_tot_navy = _hdr(NAVY), _tot(NAVY, LTBLUE)
-
     # Worksheet order matters: the dashboard must be the first, active tab.
     sw = wb.add_worksheet(SUMMARY_SHEET_NAME)
     cd = wb.add_worksheet(CDSHEET)
     cd.hide()
 
-    # ---------------------------------------------------------------- chart data
+    def _f(**kw):
+        base = {"font_name": "Calibri", "font_size": 10, "valign": "vcenter"}
+        base.update(kw)
+        return wb.add_format(base)
 
+    # ------------------------------------------------------------- formats
+    f_canvas   = _f(bg_color=CANVAS)
+    f_banner   = _f(bold=True, font_size=19, font_color=WHITE, bg_color=INK,
+                    align="left")
+    f_accent   = _f(bg_color=ACCENT)
+    f_meta     = _f(font_size=9, font_color=MUTED, bg_color=CANVAS, align="left")
+    f_meta_r   = _f(font_size=9, font_color=MUTED, bg_color=CANVAS, align="right")
+    f_section  = _f(bold=True, font_size=10, font_color=INK, bg_color=CANVAS,
+                    align="left", left=5, left_color=ACCENT,
+                    bottom=1, bottom_color=LINE)
+    f_note     = _f(font_size=9, italic=True, font_color=MUTED, bg_color=CANVAS,
+                    align="left")
+
+    f_th       = _f(bold=True, font_size=10, font_color=WHITE, bg_color=INK,
+                    align="center", border=1, border_color=INK)
+    f_th_l     = _f(bold=True, font_size=10, font_color=WHITE, bg_color=INK,
+                    align="left", border=1, border_color=INK)
+
+    def _cell(align="center", alt=False, **kw):
+        base = dict(align=align, border=1, border_color=LINE, font_color=SLATE)
+        if alt:
+            base["bg_color"] = LINE_SOFT
+        base.update(kw)
+        return _f(**base)
+
+    f_c, f_c_alt = _cell(), _cell(alt=True)
+    f_l, f_l_alt = _cell("left", font_color=INK), _cell("left", alt=True, font_color=INK)
+    f_p, f_p_alt = _cell(num_format="0.0%"), _cell(alt=True, num_format="0.0%")
+    f_b, f_b_alt = _cell(bold=True, font_color=INK), _cell(alt=True, bold=True, font_color=INK)
+
+    f_tot      = _f(bold=True, font_size=10, font_color=ACCENT_D, bg_color=ACCENT_L,
+                    align="center", border=1, border_color=LINE)
+    f_tot_l    = _f(bold=True, font_size=10, font_color=ACCENT_D, bg_color=ACCENT_L,
+                    align="left", border=1, border_color=LINE)
+    f_tot_p    = _f(bold=True, font_size=10, font_color=ACCENT_D, bg_color=ACCENT_L,
+                    align="center", border=1, border_color=LINE, num_format="0.0%")
+
+    f_data_hdr = _f(bold=True, font_color=WHITE, bg_color=INK, align="center",
+                    border=1, border_color=INK)
+    f_cell     = _cell("left", font_color=INK)
+    f_cell_alt = _cell("left", alt=True, font_color=INK)
+    f_date     = _cell("left", font_color=INK, num_format="dd mmm yyyy hh:mm")
+    f_date_alt = _cell("left", alt=True, font_color=INK,
+                       num_format="dd mmm yyyy hh:mm")
+
+    f_status_hdr = {st: _f(bold=True, font_size=10, font_color=WHITE,
+                           bg_color=_STATUS_RAG[st], align="center",
+                           border=1, border_color=_STATUS_RAG[st])
+                    for st in STATUS_ORDER}
+    f_status_cell = {st: _f(align="center", border=1, border_color=LINE,
+                            bg_color=_STATUS_TINT[st], font_color=_STATUS_DARK[st],
+                            bold=True) for st in STATUS_ORDER}
+
+    def W(row, c1, c2, value, fmt):
+        """Write, merging when the span is wider than one column."""
+        if c2 > c1:
+            sw.merge_range(row, c1, row, c2, value, fmt)
+        else:
+            sw.write(row, c1, value, fmt)
+
+    def band(row, height, fmt=None):
+        """Fill the full page width so the sheet reads as a designed page."""
+        sw.set_row(row, height)
+        sw.merge_range(row, GUTTER, row, CN + 1, "", fmt or f_canvas)
+
+    def section(row, text, sub=""):
+        sw.set_row(row, 24)
+        sw.write_blank(row, GUTTER, None, f_canvas)
+        W(row, C0, CN, f"  {text.upper()}" + (f"      {sub}" if sub else ""),
+          f_section)
+        sw.write_blank(row, CN + 1, None, f_canvas)
+
+    # -------------------------------------------------------- chart data sheet
     mods   = m["module_names"]
     NM     = len(mods)
     st_lbl = m["status_labels"]
+    at_lbl = m["alltime_labels"]
 
-    # cols 0..4 : module | Closed | In Progress | Open | Other
-    # zeros are written BLANK so Excel draws no segment and no label
     mods_chart = list(reversed(mods))          # ascending -> biggest on top
     for i, mod in enumerate(mods_chart):
         cd.write_string(i, 0, str(mod))
@@ -789,407 +848,482 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
             if v:
                 cd.write_number(i, j, v)
             else:
-                cd.write_blank(i, j, None)
+                cd.write_blank(i, j, None)     # blank -> no segment, no label
 
-    # cols 6,7 : status | count  (only non-zero statuses)
     for i, (l, c) in enumerate(zip(st_lbl, m["status_counts"])):
         cd.write_string(i, 6, l)
         cd.write_number(i, 7, c)
     NS = len(st_lbl)
 
-    # cols 9,10 : user | count
     NU = len(m["user_names"])
-    users_chart  = list(reversed(m["user_names"]))
-    counts_chart = list(reversed(m["user_counts"]))
-    for i, (u, c) in enumerate(zip(users_chart, counts_chart)):
+    for i, (u, c) in enumerate(zip(reversed(m["user_names"]),
+                                   reversed(m["user_counts"]))):
         cd.write_string(i, 9, str(u))
         cd.write_number(i, 10, c)
 
-    # cols 12,13,14 : month | created | closed
     NT = len(m["trend_labels"])
     for i in range(NT):
         cd.write_string(i, 12, m["trend_labels"][i])
         cd.write_number(i, 13, m["trend_created"][i])
         cd.write_number(i, 14, m["trend_closed"][i])
 
-    # ------------------------------------------------------------------- summary
+    for i, (l, c) in enumerate(zip(at_lbl, m["alltime_counts"])):
+        cd.write_string(i, 16, l)
+        cd.write_number(i, 17, c)
+    NA = len(at_lbl)
+
+    # ------------------------------------------------------------ page set-up
     sw.set_zoom(85)
     sw.hide_gridlines(2)
-    sw.set_tab_color(MIDBLUE)
+    sw.set_tab_color(ACCENT)
     sw.set_landscape()
     sw.set_paper(9)
     sw.fit_to_pages(1, 0)
-    sw.set_margins(0.3, 0.3, 0.4, 0.4)
-    sw.set_column(0, 0, 6)
-    sw.set_column(1, 1, 46)
-    sw.set_column(2, 6, 13)
-    sw.set_column(7, 14, 9)
+    sw.set_margins(0.25, 0.25, 0.35, 0.35)
+    sw.set_column(GUTTER, GUTTER, GUT_W)
+    sw.set_column(C0, CN, COL_W)
+    sw.set_column(CN + 1, CN + 1, GUT_W)
 
-    total   = m["total_union"] or 1
-    closed  = next((c for l, c in zip(st_lbl, m["status_counts"]) if l == "Closed"), 0)
-    inprog  = next((c for l, c in zip(st_lbl, m["status_counts"]) if l == "In Progress"), 0)
-    openc   = next((c for l, c in zip(st_lbl, m["status_counts"]) if l == "Open"), 0)
-    other   = next((c for l, c in zip(st_lbl, m["status_counts"]) if l == "Other"), 0)
+    total  = m["total_union"] or 1
+    def _pick(labels, counts, name):
+        return next((c for l, c in zip(labels, counts) if l == name), 0)
+    closed = _pick(st_lbl, m["status_counts"], "Closed")
+    inprog = _pick(st_lbl, m["status_counts"], "In Progress")
+    openc  = _pick(st_lbl, m["status_counts"], "Open")
+    other  = _pick(st_lbl, m["status_counts"], "Other")
     res_rate = closed / total * 100
     pend_pct = (openc + inprog) / total * 100
 
-    def _rag(value, green, amber, higher=True):
-        if higher:
-            if value >= green: return D_GREEN, LTGREEN
-            if value >= amber: return CLR_INPROG_D, "#FEF3C7"
-            return CLR_OPEN_D, "#FEE2E2"
-        if value <= green: return D_GREEN, LTGREEN
-        if value <= amber: return CLR_INPROG_D, "#FEF3C7"
-        return CLR_OPEN_D, "#FEE2E2"
+    # ---------------------------------------------------------------- banner
+    sw.set_row(0, 46)
+    W(0, GUTTER, CN + 1, "   INCIDENT SUMMARY DASHBOARD", f_banner)
+    band(1, 5, f_accent)
+    sw.set_row(2, 20)
+    sw.write_blank(2, GUTTER, None, f_canvas)
+    W(2, C0, 12,
+      f"  {start_dt:%d %b %Y}  —  {end_dt:%d %b %Y}"
+      f"      ·      {m['n_created']:,} created in period"
+      f"      ·      {m['n_closed']:,} closed in period", f_meta)
+    W(2, 13, CN, f"Generated {datetime.now():%d %b %Y, %H:%M}   ", f_meta_r)
+    sw.write_blank(2, CN + 1, None, f_canvas)
+    band(3, 10)
 
-    rate_hdr, rate_bg = _rag(res_rate, 80, 60, True)
-    pend_hdr, pend_bg = _rag(pend_pct, 10, 25, False)
-
-    # banner
-    sw.set_row(0, 42)
-    sw.merge_range(0, 0, 0, 14, "  INCIDENT SUMMARY DASHBOARD",
-                   _f(bold=True, font_size=20, font_color=WHITE, bg_color=NAVY, align="left"))
-    sw.set_row(1, 20)
-    sw.merge_range(1, 0, 1, 14,
-                   f"  Reporting Period:  {start_dt:%d %b %Y}  ─  {end_dt:%d %b %Y}"
-                   f"     │     Created in period: {m['n_created']:,}"
-                   f"     │     Closed in period: {m['n_closed']:,}"
-                   f"     │     Generated: {datetime.now():%d %b %Y, %H:%M}",
-                   _f(font_size=10, font_color="#E0E7FF", italic=True,
-                      bg_color=MIDBLUE, align="left"))
-    sw.set_row(2, 8)
-
-    # KPI tiles — five across 15 columns
-    KPI = 3
+    # ------------------------------------------------------------- KPI cards
+    KPI = 4
     tiles = [
-        ("TOTAL IN PERIOD", f"{m['total_union']:,}", _progress_bar(100), NAVY, LTBLUE),
-        ("CLOSED", f"{closed:,}", _progress_bar(res_rate), rate_hdr, rate_bg),
-        ("IN PROGRESS", f"{inprog:,}", _progress_bar(inprog / total * 100), CLR_INPROG_D, "#FEF3C7"),
-        ("OPEN / PENDING", f"{openc:,}", _progress_bar(pend_pct), pend_hdr, pend_bg),
-        ("RESOLUTION RATE", f"{res_rate:.0f}%", _progress_bar(res_rate), rate_hdr, rate_bg),
+        ("TOTAL IN PERIOD", f"{m['total_union']:,}",
+         f"of {m['alltime_total']:,} incidents in the whole file",
+         ACCENT, m['total_union'] / (m['alltime_total'] or 1) * 100),
+        ("CLOSED",          f"{closed:,}",  "resolved within the period",
+         GREEN, res_rate),
+        ("IN PROGRESS",     f"{inprog:,}",  "actively being worked",
+         AMBER, inprog / total * 100),
+        ("OPEN / PENDING",  f"{openc:,}",   "not yet picked up",
+         RED, openc / total * 100),
+        ("RESOLUTION RATE", f"{res_rate:.0f}%", "closed ÷ total in period",
+         GREEN if res_rate >= 80 else AMBER if res_rate >= 60 else RED, res_rate),
     ]
-    sw.set_row(KPI, 16); sw.set_row(KPI + 1, 46)
-    sw.set_row(KPI + 2, 18); sw.set_row(KPI + 3, 4); sw.set_row(KPI + 4, 8)
-    for bi, (label, value, bar, hdr_c, bg_c) in enumerate(tiles):
-        c1, c2 = bi * 3, bi * 3 + 2
-        sw.merge_range(KPI, c1, KPI, c2, label,
-                       _f(bold=True, font_size=10, font_color=WHITE, bg_color=hdr_c,
-                          align="center", border=1, border_color=hdr_c))
-        sw.merge_range(KPI + 1, c1, KPI + 1, c2, value,
-                       _f(bold=True, font_size=26, font_color=NAVY, bg_color=bg_c,
-                          align="center", left=1, right=1,
-                          left_color=GREYLINE, right_color=GREYLINE))
-        sw.merge_range(KPI + 2, c1, KPI + 2, c2, bar,
-                       _f(font_size=8, bold=True, font_color=hdr_c, bg_color=bg_c,
-                          align="center", left=1, right=1, font_name="Consolas",
-                          left_color=GREYLINE, right_color=GREYLINE))
-        sw.merge_range(KPI + 3, c1, KPI + 3, c2, "", _f(bg_color=hdr_c))
+    sw.set_row(KPI, 5); sw.set_row(KPI + 1, 17); sw.set_row(KPI + 2, 42)
+    sw.set_row(KPI + 3, 15); sw.set_row(KPI + 4, 14)
+    for r in range(KPI, KPI + 5):
+        sw.write_blank(r, GUTTER, None, f_canvas)
+        sw.write_blank(r, CN + 1, None, f_canvas)
+    step = (CN - C0 + 1) // len(tiles)
+    for bi, (label, value, caption, colour, pct) in enumerate(tiles):
+        c1 = C0 + bi * step
+        c2 = CN if bi == len(tiles) - 1 else c1 + step - 1
+        side = dict(left=1, right=1, left_color=LINE, right_color=LINE)
+        W(KPI, c1, c2, "", _f(bg_color=colour))
+        W(KPI + 1, c1, c2, f"  {label}",
+          _f(bold=True, font_size=9, font_color=MUTED, bg_color=WHITE,
+             align="left", **side))
+        W(KPI + 2, c1, c2, value,
+          _f(bold=True, font_size=30, font_color=INK, bg_color=WHITE,
+             align="center", **side))
+        W(KPI + 3, c1, c2, _progress_bar(pct, 18),
+          _f(font_size=8, bold=True, font_color=colour, bg_color=WHITE,
+             align="center", font_name="Consolas", **side))
+        W(KPI + 4, c1, c2, f"  {caption}",
+          _f(font_size=8, italic=True, font_color=MUTED, bg_color=WHITE,
+             align="left", bottom=1, bottom_color=LINE, **side))
 
     sw.freeze_panes(KPI + 5, 0)
     cursor = KPI + 5
+    band(cursor, 12); cursor += 1
 
-    def _divider(row, color=MIDBLUE):
-        sw.set_row(row, 3)
-        sw.merge_range(row, 0, row, 14, "", _f(bg_color=color))
-
-    # ---- insight strip: 3 boxes ---------------------------------------------
-    boxes = [("◆  MOST IMPACTED MODULE", MIDBLUE, "#E0E7FF",
-              (mods[0][:26] if mods else "—"),
+    # --------------------------------------------------------- insight cards
+    boxes = [("MOST IMPACTED MODULE", ACCENT, ACCENT_L,
+              (str(mods[0])[:24] if mods else "—"),
               f"{(m['module_totals'][0] if mods else 0):,} incidents in period")]
     if COL_EVENT_COUNT:
-        boxes.append(("★  TOTAL EVENTS CLOSED", D_GREEN, LTGREEN,
+        boxes.append(("TOTAL EVENTS CLOSED", GREEN, GREEN_L,
                       f"{m['total_events']:,}",
-                      f"sum of '{COL_EVENT_COUNT}' — closed in period"))
-    boxes.append(("⏱  AVG RESOLUTION TIME", D_PURP, LTPURP,
-                  _fmt_days(m["mttr_mean"]),
-                  f"median {_fmt_days(m['mttr_med'])} · {m['n_closed']:,} closed"))
+                      f"sum of '{COL_EVENT_COUNT}' for closures in period"))
+    boxes.append(("OPEN BACKLOG · ALL TIME", RED, RED_L,
+                  f"{m['alltime_backlog']:,}",
+                  f"open + in progress across all {m['alltime_total']:,} incidents"))
+    if m["user_names"]:
+        boxes.append(("TOP CLOSER", ACCENT_D, ACCENT_L,
+                      str(m["user_names"][0])[:22],
+                      f"{m['user_counts'][0]:,} closed in period"))
 
-    sw.set_row(cursor, 16)
-    sw.merge_range(cursor, 0, cursor, 14,
-                   "  KEY INSIGHTS  —  AUTO-GENERATED FROM PERIOD DATA",
-                   _f(bold=True, font_size=9, font_color="#374151", italic=True,
-                      bg_color=OFFWHITE, align="left", left=5, left_color=MIDBLUE,
-                      top=1, bottom=1, top_color=GREYLINE, bottom_color=GREYLINE))
+    section(cursor, "Key insights", "auto-generated from the period data")
     cursor += 1
-    sw.set_row(cursor, 20); sw.set_row(cursor + 1, 44)
-    sw.set_row(cursor + 2, 16); sw.set_row(cursor + 3, 6)
+    sw.set_row(cursor, 5); sw.set_row(cursor + 1, 16)
+    sw.set_row(cursor + 2, 34); sw.set_row(cursor + 3, 16)
+    for r in range(cursor, cursor + 4):
+        sw.write_blank(r, GUTTER, None, f_canvas)
+        sw.write_blank(r, CN + 1, None, f_canvas)
+    width, rem = divmod(CN - C0 + 1, len(boxes))
+    c1 = C0
+    for bi, (title, colour, tint, big, sub) in enumerate(boxes):
+        w = width + (1 if bi < rem else 0)
+        c2 = c1 + w - 1
+        side = dict(left=1, right=1, left_color=LINE, right_color=LINE)
+        W(cursor, c1, c2, "", _f(bg_color=colour))
+        W(cursor + 1, c1, c2, f"  {title}",
+          _f(bold=True, font_size=8, font_color=colour, bg_color=tint,
+             align="left", **side))
+        W(cursor + 2, c1, c2, big,
+          _f(bold=True, font_size=17, font_color=INK, bg_color=tint,
+             align="center", **side))
+        W(cursor + 3, c1, c2, f"  {sub}",
+          _f(font_size=8, italic=True, font_color=SLATE, bg_color=tint,
+             align="left", bottom=1, bottom_color=LINE, **side))
+        c1 = c2 + 1
+    cursor += 4
+    band(cursor, 12); cursor += 1
 
-    span = 15 // len(boxes)
-    for bi, (title, hdr_c, bg_c, big, sub) in enumerate(boxes):
-        c1 = bi * span
-        c2 = (14 if bi == len(boxes) - 1 else c1 + span - 1)
-        sw.merge_range(cursor, c1, cursor, c2, title,
-                       _f(bold=True, font_size=9, font_color=WHITE, bg_color=hdr_c,
-                          align="center", border=1, top=2, top_color=hdr_c))
-        sw.merge_range(cursor + 1, c1, cursor + 1, c2, big,
-                       _f(bold=True, font_size=18, font_color=NAVY, bg_color=bg_c,
-                          align="center", border=1))
-        sw.merge_range(cursor + 2, c1, cursor + 2, c2, sub,
-                       _f(font_size=9, italic=True, font_color=SUBTLE,
-                          bg_color=bg_c, align="center", border=1))
-        sw.merge_range(cursor + 3, c1, cursor + 3, c2, "", _f(bg_color=hdr_c))
-    cursor += 5
-
-    _divider(cursor); cursor += 1
-
-    # ---- module table (now shows the status split too) ----------------------
-    sw.set_row(cursor, 26)
-    sw.write(cursor, 0, "  Incidents in Period  —  Module-wise  (Created OR Closed in Range)",
-             f_section)
+    # ------------------------------------------------------- module break-down
+    MOD_COLS = [("#", 1, 1), ("Module Name", 2, 8), ("Total", 9, 10),
+                ("Closed", 11, 12), ("In Progress", 13, 14), ("Open", 15, 16),
+                ("Other", 17, 18), ("% of Period", 19, 20)]
+    section(cursor, "Module breakdown",
+            "incidents created OR closed inside the reporting period")
     HDR = cursor + 1
     DS  = HDR + 1
     TR  = DS + NM
-    sw.set_row(HDR, 24)
-    headers = ["#", "Module Name", "Total", "Closed", "In Progress", "Open", "Other", "% of Period"]
-    for ci, h in enumerate(headers):
-        sw.write(HDR, ci, h, f_hdr_purp)
+    sw.set_row(HDR, 22)
+    sw.write_blank(HDR, GUTTER, None, f_canvas)
+    sw.write_blank(HDR, CN + 1, None, f_canvas)
+    for name, c1, c2 in MOD_COLS:
+        fmt = f_status_hdr[name] if name in STATUS_ORDER else (
+            f_th_l if name == "Module Name" else f_th)
+        W(HDR, c1, c2, name, fmt)
+
     for i, mod in enumerate(mods):
         r = DS + i
         alt = (i % 2 == 1)
         sb = m["module_status"][mod]
-        sw.set_row(r, 18)
-        sw.write(r, 0, i + 1, f_num_alt if alt else f_num)
-        sw.write(r, 1, str(mod), f_lft_alt if alt else f_lft)
-        sw.write(r, 2, m["module_totals"][i], f_num_alt if alt else f_num)
-        for j, s in enumerate(STATUS_ORDER):
-            sw.write(r, 3 + j, sb.get(s, 0), f_num_alt if alt else f_num)
-        sw.write(r, 7, m["module_totals"][i] / total, f_pct_alt if alt else f_pct)
+        sw.set_row(r, 19)
+        sw.write_blank(r, GUTTER, None, f_canvas)
+        sw.write_blank(r, CN + 1, None, f_canvas)
+        W(r, 1, 1, i + 1, f_c_alt if alt else f_c)
+        W(r, 2, 8, f"  {mod}", f_l_alt if alt else f_l)
+        W(r, 9, 10, m["module_totals"][i], f_b_alt if alt else f_b)
+        for j, st in enumerate(STATUS_ORDER):
+            c1 = 11 + j * 2
+            W(r, c1, c1 + 1, sb.get(st, 0), f_status_cell[st])
+        W(r, 19, 20, m["module_totals"][i] / total, f_p_alt if alt else f_p)
 
-    sw.conditional_format(DS, 2, TR - 1, 2, {
-        "type": "data_bar", "data_bar_2010": True, "bar_color": "#60A5FA",
-        "bar_border_color": MIDBLUE, "bar_solid": True,
+    sw.conditional_format(DS, 9, TR - 1, 9, {
+        "type": "data_bar", "data_bar_2010": True, "bar_color": "#A5B4FC",
+        "bar_border_color": ACCENT, "bar_solid": True,
         "min_type": "num", "min_value": 0, "bar_direction": "left"})
 
-    sw.set_row(TR, 24)
-    sw.merge_range(TR, 0, TR, 1, "TOTAL", f_tot_purp)
-    sw.write_formula(TR, 2, f"=SUM(C{DS + 1}:C{DS + NM})", f_tot_purp, m["total_union"])
-    for j, s in enumerate(STATUS_ORDER):
-        col = chr(ord("D") + j)
-        val = sum(m["module_status"][mod].get(s, 0) for mod in mods)
-        sw.write_formula(TR, 3 + j, f"=SUM({col}{DS + 1}:{col}{DS + NM})", f_tot_purp, val)
-    sw.write_formula(TR, 7, f"=SUM(H{DS + 1}:H{DS + NM})",
-                     _f(bold=True, font_size=11, font_color=D_PURP, bg_color=LTPURP,
-                        align="center", border=1, num_format="0.0%"), 1.0)
-    cursor = TR + 2
+    sw.set_row(TR, 22)
+    sw.write_blank(TR, GUTTER, None, f_canvas)
+    sw.write_blank(TR, CN + 1, None, f_canvas)
+    W(TR, 1, 8, "  TOTAL", f_tot_l)
+    L = xl_col_to_name(9)
+    W(TR, 9, 10, "", f_tot)
+    sw.write_formula(TR, 9, f"=SUM({L}{DS + 1}:{L}{DS + NM})", f_tot,
+                     m["total_union"])
+    for j, st in enumerate(STATUS_ORDER):
+        c1 = 11 + j * 2
+        L = xl_col_to_name(c1)
+        val = sum(m["module_status"][mod].get(st, 0) for mod in mods)
+        W(TR, c1, c1 + 1, "", f_tot)
+        sw.write_formula(TR, c1, f"=SUM({L}{DS + 1}:{L}{DS + NM})", f_tot, val)
+    L = xl_col_to_name(19)
+    W(TR, 19, 20, "", f_tot_p)
+    sw.write_formula(TR, 19, f"=SUM({L}{DS + 1}:{L}{DS + NM})", f_tot_p, 1.0)
+    cursor = TR + 1
+    band(cursor, 8); cursor += 1
 
-    # ---- status mini table ---------------------------------------------------
-    sw.set_row(cursor, 26)
-    sw.write(cursor, 0, "  Current Status Breakdown  —  All Incidents in Period", f_section)
-    cursor += 1
-    for ci, h in enumerate(["Status", "Count", "% Share"]):
-        sw.write(cursor, ci, h, f_hdr_purp)
-    cursor += 1
-    for lbl, cnt in zip(st_lbl, m["status_counts"]):
-        bg = _STATUS_RAG.get(lbl, ALT)
-        fg = _STATUS_LABEL_FG.get(lbl, WHITE)
-        sw.write(cursor, 0, lbl, _f(bold=True, align="left", border=1, bg_color=bg, font_color=fg))
-        sw.write(cursor, 1, cnt, _f(bold=True, align="center", border=1, bg_color=bg, font_color=fg))
-        sw.write(cursor, 2, cnt / total, _f(align="center", border=1, bg_color=bg,
-                                            num_format="0.0%", font_color=fg))
-        cursor += 1
-    sw.write(cursor, 0, "TOTAL", f_tot_navy)
-    sw.write_formula(cursor, 1, f"=SUM(B{cursor - len(st_lbl) + 1}:B{cursor})",
-                     f_tot_navy, m["total_union"])
-    sw.write(cursor, 2, 1.0, _f(bold=True, align="center", border=1,
-                                bg_color=LTBLUE, num_format="0.0%", font_color=NAVY))
-    cursor += 2
-    if other:
-        sw.merge_range(cursor, 0, cursor, 7,
-                       f"  ℹ  {other:,} incident(s) have a status outside the "
-                       f"Closed / In Progress / Open mapping and are shown as 'Other'. "
-                       f"See the Data Quality sheet, then extend STATUS_RULES if needed.",
-                       _f(font_size=9, italic=True, font_color=SUBTLE, bg_color=OFFWHITE))
-        cursor += 2
-
-    _divider(cursor); cursor += 1
-
-    # ---- charts --------------------------------------------------------------
-    sw.set_row(cursor, 22)
-    sw.write(cursor, 0, "  Visual Summary", f_section)
-    cursor += 1
-    CHART_ROW = cursor
-
+    # ---------------------------------------------------- stacked module chart
     def _style(ch):
-        ch.set_plotarea({"border": {"none": True}, "fill": {"color": OFFWHITE}})
-        ch.set_chartarea({"border": {"color": GREYLINE, "width": 0.75},
+        ch.set_plotarea({"border": {"none": True}, "fill": {"color": WHITE}})
+        ch.set_chartarea({"border": {"color": LINE, "width": 0.75},
                           "fill": {"color": WHITE}})
         ch.set_style(2)
 
     def _labels(values, colour):
-        """Per-point labels with zeros deleted — kills the stray '0'."""
-        return {
-            "value": True,
-            "position": "center",
-            "font": {"bold": True, "size": 11, "color": colour, "name": "Calibri"},
-            "custom": [({"delete": True} if not v else None) for v in values],
-        }
+        """Per-point labels with zero points deleted."""
+        return {"value": True, "position": "center",
+                "font": {"bold": True, "size": 11, "color": colour,
+                         "name": "Calibri"},
+                "custom": [({"delete": True} if not v else None) for v in values]}
 
-    bar_h = max(520, NM * 62 + 190)
-    bar_w = 900
     if NM:
+        bar_h = max(440, NM * 56 + 170)
         stacked = wb.add_chart({"type": "bar", "subtype": "stacked"})
-        for j, s in enumerate(STATUS_ORDER, start=1):
-            vals = [m["module_status"][mod].get(s, 0) for mod in mods_chart]
+        for j, st in enumerate(STATUS_ORDER, start=1):
+            vals = [m["module_status"][mod].get(st, 0) for mod in mods_chart]
             if not any(vals):
-                continue                       # series entirely empty -> omit
-            fg = NAVY if s == "In Progress" else WHITE
+                continue
             stacked.add_series({
-                "name": s,
+                "name": st,
                 "categories": [CDSHEET, 0, 0, NM - 1, 0],
                 "values": [CDSHEET, 0, j, NM - 1, j],
-                "fill": {"color": _STATUS_RAG[s]},
+                "fill": {"color": _STATUS_RAG[st]},
                 "border": {"color": WHITE, "width": 1.25},
-                "gap": 30,
-                "overlap": 100,
-                "data_labels": _labels(vals, fg),
+                "gap": 32, "overlap": 100,
+                "data_labels": _labels(vals, WHITE),
             })
-        stacked.set_title({"name": f"Incidents by Module  ·  Period Total: {m['total_union']:,}",
-                           "name_font": {"bold": True, "size": 14, "color": NAVY,
-                                         "name": "Calibri"}})
+        stacked.set_title({
+            "name": f"Incidents by module, split by status  ·  {m['total_union']:,} in period",
+            "name_font": {"bold": True, "size": 12, "color": INK, "name": "Calibri"}})
         stacked.set_legend({"position": "bottom",
-                            "font": {"bold": True, "size": 11, "color": SUBTLE, "name": "Calibri"},
-                            "border": {"color": GREYLINE}, "fill": {"color": OFFWHITE}})
-        stacked.set_x_axis({"num_font": {"size": 11, "color": SUBTLE},
+                            "font": {"bold": True, "size": 10, "color": SLATE,
+                                     "name": "Calibri"},
+                            "border": {"none": True}, "fill": {"none": True}})
+        stacked.set_x_axis({"num_font": {"size": 10, "color": MUTED},
                             "major_gridlines": {"visible": True,
-                                                "line": {"color": GREYLINE, "width": 0.75,
+                                                "line": {"color": LINE, "width": 0.75,
                                                          "dash_type": "dash"}},
-                            "line": {"color": GREYLINE}, "num_format": "0", "min": 0})
-        stacked.set_y_axis({"num_font": {"size": 12, "bold": True, "color": NAVY},
-                            "line": {"none": True}, "major_tick_mark": "none",
+                            "line": {"none": True}, "num_format": "0", "min": 0})
+        stacked.set_y_axis({"num_font": {"size": 11, "bold": True, "color": INK},
+                            "line": {"color": LINE}, "major_tick_mark": "none",
                             "major_gridlines": {"visible": False}})
         stacked.show_blanks_as("gap")
         _style(stacked)
-        stacked.set_size({"width": bar_w, "height": bar_h})
-        sw.insert_chart(CHART_ROW, 0, stacked, {"x_offset": 5, "y_offset": 5})
+        stacked.set_size({"width": 1215, "height": bar_h})
+        sw.insert_chart(cursor, C0, stacked, {"x_offset": 2, "y_offset": 2})
+        cursor += _rows_for(bar_h)
+        band(cursor, 12); cursor += 1
+
+    # ------------------------------------------- status mix: period + all time
+    section(cursor, "Status mix",
+            "left: the reporting period   ·   right: every incident in the file")
+    cursor += 1
+    mix_top = cursor
+
+    def _mini_table(row, heading, labels, counts, grand):
+        sw.set_row(row, 20)
+        sw.write_blank(row, GUTTER, None, f_canvas)
+        W(row, 1, 8, f"  {heading}",
+          _f(bold=True, font_size=9, font_color=WHITE, bg_color=SLATE, align="left"))
+        row += 1
+        sw.set_row(row, 20)
+        W(row, 1, 4, "Status", f_th_l)
+        W(row, 5, 6, "Count", f_th)
+        W(row, 7, 8, "% Share", f_th)
+        row += 1
+        first = row
+        g = grand or 1
+        for lbl, cnt in zip(labels, counts):
+            sw.set_row(row, 19)
+            W(row, 1, 4, f"  {lbl}",
+              _f(bold=True, align="left", border=1, border_color=LINE,
+                 bg_color=_STATUS_TINT[lbl], font_color=_STATUS_DARK[lbl]))
+            W(row, 5, 6, cnt,
+              _f(bold=True, align="center", border=1, border_color=LINE,
+                 bg_color=_STATUS_TINT[lbl], font_color=_STATUS_DARK[lbl]))
+            W(row, 7, 8, cnt / g,
+              _f(align="center", border=1, border_color=LINE, num_format="0.0%",
+                 bg_color=_STATUS_TINT[lbl], font_color=_STATUS_DARK[lbl]))
+            row += 1
+        sw.set_row(row, 21)
+        W(row, 1, 4, "  TOTAL", f_tot_l)
+        col = xl_col_to_name(5)
+        W(row, 5, 6, "", f_tot)
+        sw.write_formula(row, 5, f"=SUM({col}{first + 1}:{col}{row})", f_tot, grand)
+        W(row, 7, 8, 1.0, f_tot_p)
+        return row + 1
+
+    r = _mini_table(mix_top, "IN PERIOD", st_lbl, m["status_counts"],
+                    m["total_union"])
+    r += 1
+    r = _mini_table(r, "ALL TIME  ·  ENTIRE FILE", at_lbl, m["alltime_counts"],
+                    m["alltime_total"])
 
     if NS:
         donut = wb.add_chart({"type": "doughnut"})
         donut.add_series({
-            "name": "Status",
+            "name": "In period",
             "categories": [CDSHEET, 0, 6, NS - 1, 6],
             "values": [CDSHEET, 0, 7, NS - 1, 7],
-            "points": [{"fill": {"color": _STATUS_RAG.get(l, MIDBLUE)},
+            "points": [{"fill": {"color": _STATUS_RAG.get(l, ACCENT)},
                         "border": {"color": WHITE, "width": 2}} for l in st_lbl],
             "data_labels": {"percentage": True, "category": True, "value": True,
                             "separator": "\n",
                             "font": {"bold": True, "size": 9, "name": "Calibri",
-                                     "color": NAVY}},
+                                     "color": INK}},
         })
-        donut.set_hole_size(55)
-        donut.set_title({"name": f"Period Status Mix\nTotal: {m['total_union']:,} incidents",
-                         "name_font": {"bold": True, "size": 11, "color": NAVY,
+        donut.set_hole_size(58)
+        donut.set_title({"name": f"In period\n{m['total_union']:,} incidents",
+                         "name_font": {"bold": True, "size": 11, "color": INK,
                                        "name": "Calibri"}})
         donut.set_legend({"none": True})
         _style(donut)
-        donut.set_size({"width": 360, "height": 360})
-        sw.insert_chart(CHART_ROW, 13, donut, {"x_offset": 5, "y_offset": 5})
+        donut.set_size({"width": 372, "height": 310})
+        sw.insert_chart(mix_top, 9, donut, {"x_offset": 4, "y_offset": 0})
 
-    cursor = CHART_ROW + _rows_for(bar_h if NM else 380)
+    if NA:
+        pie = wb.add_chart({"type": "pie"})
+        pie.add_series({
+            "name": "All time",
+            "categories": [CDSHEET, 0, 16, NA - 1, 16],
+            "values": [CDSHEET, 0, 17, NA - 1, 17],
+            "points": [{"fill": {"color": _STATUS_RAG.get(l, ACCENT)},
+                        "border": {"color": WHITE, "width": 2}} for l in at_lbl],
+            "data_labels": {"percentage": True, "category": True, "value": True,
+                            "separator": "\n",
+                            "font": {"bold": True, "size": 9, "name": "Calibri",
+                                     "color": INK}},
+        })
+        pie.set_title({"name": f"All time · entire file\n{m['alltime_total']:,} incidents",
+                       "name_font": {"bold": True, "size": 11, "color": INK,
+                                     "name": "Calibri"}})
+        pie.set_legend({"none": True})
+        _style(pie)
+        pie.set_size({"width": 372, "height": 310})
+        sw.insert_chart(mix_top, 15, pie, {"x_offset": 4, "y_offset": 0})
 
-    # trend chart
+    cursor = mix_top + max(r - mix_top, _rows_for(310))
+    if other:
+        sw.set_row(cursor, 16)
+        sw.write_blank(cursor, GUTTER, None, f_canvas)
+        W(cursor, C0, CN,
+          f"  {other:,} incident(s) in the period carry a status outside the "
+          f"Closed / In Progress / Open mapping and are grouped as 'Other'. "
+          f"The Data Quality tab lists the exact values — add them to "
+          f"STATUS_RULES to reclassify.", f_note)
+        cursor += 1
+    band(cursor, 12); cursor += 1
+
+    # ------------------------------------------------------------ trend chart
     if NT >= 2:
+        section(cursor, "Monthly trend", "created vs closed, inside the period")
+        cursor += 1
         trend = wb.add_chart({"type": "line"})
-        for name, col, colour in (("Created", 13, MIDBLUE), ("Closed", 14, CLR_CLOSED)):
+        for name, col, colour in (("Created", 13, ACCENT), ("Closed", 14, GREEN)):
             trend.add_series({
                 "name": name,
                 "categories": [CDSHEET, 0, 12, NT - 1, 12],
                 "values": [CDSHEET, 0, col, NT - 1, col],
                 "line": {"color": colour, "width": 2.5},
-                "marker": {"type": "circle", "size": 6,
+                "marker": {"type": "circle", "size": 7,
                            "fill": {"color": colour},
                            "border": {"color": WHITE, "width": 1.5}},
                 "data_labels": {"value": True,
                                 "font": {"bold": True, "size": 9, "color": colour,
                                          "name": "Calibri"}},
             })
-        trend.set_title({"name": "Monthly Trend  ·  Created vs Closed",
-                         "name_font": {"bold": True, "size": 12, "color": NAVY,
-                                       "name": "Calibri"}})
+        trend.set_title({"name": "", "none": True})
         trend.set_legend({"position": "bottom",
-                          "font": {"bold": True, "size": 10, "color": SUBTLE}})
-        trend.set_x_axis({"num_font": {"size": 10, "bold": True, "color": NAVY},
-                          "line": {"color": GREYLINE}})
-        trend.set_y_axis({"num_font": {"size": 10, "color": SUBTLE},
+                          "font": {"bold": True, "size": 10, "color": SLATE},
+                          "border": {"none": True}})
+        trend.set_x_axis({"num_font": {"size": 10, "bold": True, "color": INK},
+                          "line": {"color": LINE}, "major_tick_mark": "none"})
+        trend.set_y_axis({"num_font": {"size": 10, "color": MUTED},
                           "major_gridlines": {"visible": True,
-                                              "line": {"color": GREYLINE, "width": 0.75,
+                                              "line": {"color": LINE, "width": 0.75,
                                                        "dash_type": "dash"}},
                           "line": {"none": True}, "min": 0, "num_format": "0"})
         _style(trend)
-        trend.set_size({"width": 900, "height": 340})
-        sw.insert_chart(cursor, 0, trend, {"x_offset": 5, "y_offset": 5})
-        cursor += _rows_for(340)
+        trend.set_size({"width": 1215, "height": 300})
+        sw.insert_chart(cursor, C0, trend, {"x_offset": 2, "y_offset": 2})
+        cursor += _rows_for(300)
+        band(cursor, 12); cursor += 1
 
-    _divider(cursor); cursor += 1
-
-    # ---- user table + chart --------------------------------------------------
+    # ------------------------------------------------------ closed-by-user
     if NU:
-        sw.set_row(cursor, 26)
-        sw.write(cursor, 0, "  Incidents Closed By  —  User Wise  (Closure Date in Range)", f_section)
+        section(cursor, "Closed by user",
+                "incidents whose closure date falls inside the period")
         UHDR = cursor + 1
         UDS  = UHDR + 1
         UTR  = UDS + NU
-        sw.set_row(UHDR, 24)
-        for ci, h in enumerate(["#", "Closed By", "Incidents Closed", "% Share"]):
-            sw.write(UHDR, ci, h, f_hdr_navy)
+        sw.set_row(UHDR, 22)
+        sw.write_blank(UHDR, GUTTER, None, f_canvas)
+        W(UHDR, 1, 1, "#", f_th)
+        W(UHDR, 2, 6, "Closed By", f_th_l)
+        W(UHDR, 7, 8, "Incidents Closed", f_th)
+        W(UHDR, 9, 10, "% Share", f_th)
         tot_u = sum(m["user_counts"]) or 1
         for i in range(NU):
-            r = UDS + i
+            rr = UDS + i
             alt = (i % 2 == 1)
-            sw.set_row(r, 18)
-            sw.write(r, 0, i + 1, f_num_alt if alt else f_num)
-            sw.write(r, 1, str(m["user_names"][i]), f_lft_alt if alt else f_lft)
-            sw.write(r, 2, m["user_counts"][i], f_num_alt if alt else f_num)
-            sw.write(r, 3, m["user_counts"][i] / tot_u, f_pct_alt if alt else f_pct)
-        sw.conditional_format(UDS, 2, UTR - 1, 2, {
-            "type": "data_bar", "data_bar_2010": True, "bar_color": "#60A5FA",
-            "bar_border_color": MIDBLUE, "bar_solid": True,
+            sw.set_row(rr, 19)
+            sw.write_blank(rr, GUTTER, None, f_canvas)
+            W(rr, 1, 1, i + 1, f_c_alt if alt else f_c)
+            W(rr, 2, 6, f"  {m['user_names'][i]}", f_l_alt if alt else f_l)
+            W(rr, 7, 8, m["user_counts"][i], f_b_alt if alt else f_b)
+            W(rr, 9, 10, m["user_counts"][i] / tot_u, f_p_alt if alt else f_p)
+        sw.conditional_format(UDS, 7, UTR - 1, 7, {
+            "type": "data_bar", "data_bar_2010": True, "bar_color": "#A5B4FC",
+            "bar_border_color": ACCENT, "bar_solid": True,
             "min_type": "num", "min_value": 0, "bar_direction": "left"})
-        sw.set_row(UTR, 24)
-        sw.merge_range(UTR, 0, UTR, 1, "TOTAL", f_tot_navy)
-        sw.write_formula(UTR, 2, f"=SUM(C{UDS + 1}:C{UDS + NU})", f_tot_navy, tot_u)
-        sw.write_formula(UTR, 3, f"=SUM(D{UDS + 1}:D{UDS + NU})",
-                         _f(bold=True, font_size=11, font_color=NAVY, bg_color=LTBLUE,
-                            align="center", border=1, num_format="0.0%"), 1.0)
+        sw.set_row(UTR, 22)
+        sw.write_blank(UTR, GUTTER, None, f_canvas)
+        W(UTR, 1, 6, "  TOTAL", f_tot_l)
+        L = xl_col_to_name(7)
+        W(UTR, 7, 8, "", f_tot)
+        sw.write_formula(UTR, 7, f"=SUM({L}{UDS + 1}:{L}{UDS + NU})", f_tot, tot_u)
+        W(UTR, 9, 10, 1.0, f_tot_p)
 
         ubar = wb.add_chart({"type": "bar"})
         ubar.add_series({
             "name": "Incidents Closed",
             "categories": [CDSHEET, 0, 9, NU - 1, 9],
             "values": [CDSHEET, 0, 10, NU - 1, 10],
-            "fill": {"color": MIDBLUE},
+            "fill": {"color": ACCENT},
             "border": {"color": WHITE, "width": 0.75},
-            "gap": 55,
+            "gap": 45,
             "data_labels": {"value": True, "position": "inside_end",
                             "font": {"bold": True, "size": 10, "color": WHITE,
                                      "name": "Calibri"}},
         })
-        ubar.set_title({"name": f"Incidents Closed by User  ·  Total: {tot_u:,}",
-                        "name_font": {"bold": True, "size": 12, "color": NAVY,
+        ubar.set_title({"name": f"Closures by user  ·  {tot_u:,} in period",
+                        "name_font": {"bold": True, "size": 11, "color": INK,
                                       "name": "Calibri"}})
         ubar.set_legend({"none": True})
-        ubar.set_x_axis({"num_font": {"size": 10, "color": SUBTLE},
+        ubar.set_x_axis({"num_font": {"size": 10, "color": MUTED},
                          "major_gridlines": {"visible": True,
-                                             "line": {"color": GREYLINE, "width": 0.6,
+                                             "line": {"color": LINE, "width": 0.6,
                                                       "dash_type": "dash"}},
-                         "line": {"color": GREYLINE}, "num_format": "0", "min": 0})
-        ubar.set_y_axis({"num_font": {"size": 10, "bold": True, "color": NAVY},
-                         "line": {"none": True}, "major_tick_mark": "none",
+                         "line": {"none": True}, "num_format": "0", "min": 0})
+        ubar.set_y_axis({"num_font": {"size": 10, "bold": True, "color": INK},
+                         "line": {"color": LINE}, "major_tick_mark": "none",
                          "major_gridlines": {"visible": False}})
         _style(ubar)
-        ubar.set_size({"width": 620, "height": max(300, NU * 34 + 130)})
-        sw.insert_chart(UTR + 2, 0, ubar, {"x_offset": 5, "y_offset": 5})
+        u_h = max(270, NU * 32 + 110)
+        ubar.set_size({"width": 610, "height": u_h})
+        sw.insert_chart(UHDR, 11, ubar, {"x_offset": 6, "y_offset": 0})
+        cursor = UHDR + max(UTR - UHDR + 1, _rows_for(u_h))
+        band(cursor, 12); cursor += 1
+
+    # ---------------------------------------------------------------- footer
+    sw.set_row(cursor, 18)
+    sw.write_blank(cursor, GUTTER, None, f_canvas)
+    W(cursor, C0, CN,
+      f"  Every figure above is de-duplicated and reconciled against the same "
+      f"source rows  ·  {len(issues):,} data-quality item(s) logged on the "
+      f"'{DQ_SHEET_NAME}' tab", f_note)
+    sw.write_blank(cursor, CN + 1, None, f_canvas)
 
     # ---- emails sheet --------------------------------------------------------
     emails = m["emails"]
     if emails:
         ew = wb.add_worksheet("Emails - Closed Resolved")
         ew.hide_gridlines(2)
-        ew.set_tab_color(D_GREEN)
+        ew.set_tab_color(GREEN_D)
         ew.set_row(0, 38)
         ew.merge_range(0, 0, 0, 2,
                        f"Unique Emails — {STATUS_FOR_EMAILS.title()}  │  {len(emails):,} addresses",
-                       _f(bold=True, font_size=13, font_color=WHITE, bg_color=NAVY, align="center"))
-        eh = _f(bold=True, font_size=11, font_color=WHITE, bg_color=NAVY,
+                       _f(bold=True, font_size=13, font_color=WHITE, bg_color=INK, align="center"))
+        eh = _f(bold=True, font_size=11, font_color=WHITE, bg_color=INK,
                 align="center", border=1)
         ew.set_row(2, 22)
         ew.write(2, 0, "#", eh)
@@ -1200,21 +1334,21 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
         ew.autofilter(2, 0, 2 + len(emails), 1)
         for i, e in enumerate(emails):
             r = 3 + i
-            bg = ALT if i % 2 else WHITE
+            bg = LINE_SOFT if i % 2 else WHITE
             ew.set_row(r, 16)
-            ew.write(r, 0, i + 1, _f(align="center", border=1, border_color=GREYLINE, bg_color=bg))
-            ew.write(r, 1, e, _f(align="left", border=1, border_color=GREYLINE, bg_color=bg))
+            ew.write(r, 0, i + 1, _f(align="center", border=1, border_color=LINE, bg_color=bg))
+            ew.write(r, 1, e, _f(align="left", border=1, border_color=LINE, bg_color=bg))
 
     # ---- data quality sheet --------------------------------------------------
     dq = wb.add_worksheet(DQ_SHEET_NAME)
     dq.hide_gridlines(2)
-    dq.set_tab_color(CLR_OPEN if issues else CLR_CLOSED)
+    dq.set_tab_color(RED if issues else GREEN)
     dq.set_row(0, 38)
     dq.merge_range(0, 0, 0, 4,
                    f"Data Quality Log  │  {len(issues):,} item(s) — fix these at source "
                    f"to sharpen next month's numbers",
-                   _f(bold=True, font_size=13, font_color=WHITE, bg_color=NAVY, align="center"))
-    dq_hdr = _f(bold=True, font_size=11, font_color=WHITE, bg_color=NAVY,
+                   _f(bold=True, font_size=13, font_color=WHITE, bg_color=INK, align="center"))
+    dq_hdr = _f(bold=True, font_size=11, font_color=WHITE, bg_color=INK,
                 align="center", border=1)
     cols = ["Type", "Module", "Column", "Excel Row", "Detail / Raw Value"]
     dq.set_row(2, 22)
@@ -1228,9 +1362,9 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
         shown = issues[:MAX_DQ_ROWS]
         for i, it in enumerate(shown):
             r = 3 + i
-            bg = ALT if i % 2 else WHITE
-            cell = _f(align="left", border=1, border_color=GREYLINE, bg_color=bg)
-            ctr = _f(align="center", border=1, border_color=GREYLINE, bg_color=bg)
+            bg = LINE_SOFT if i % 2 else WHITE
+            cell = _f(align="left", border=1, border_color=LINE, bg_color=bg)
+            ctr = _f(align="center", border=1, border_color=LINE, bg_color=bg)
             dq.write(r, 0, it["Type"], cell)
             dq.write(r, 1, str(it["Module"]), cell)
             dq.write(r, 2, str(it["Column"]), cell)
@@ -1241,10 +1375,10 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
             dq.write(3 + len(shown), 0,
                      f"... {len(issues) - MAX_DQ_ROWS:,} more suppressed "
                      f"(raise MAX_DQ_ROWS to see all)",
-                     _f(italic=True, font_color=SUBTLE))
+                     _f(italic=True, font_color=MUTED))
     else:
         dq.merge_range(3, 0, 3, 4, "  ✓  No data quality issues detected in this period.",
-                       _f(bold=True, font_size=11, font_color=D_GREEN, bg_color=LTGREEN,
+                       _f(bold=True, font_size=11, font_color=GREEN_D, bg_color=GREEN_L,
                           align="left", border=1))
 
     if _unmapped_statuses:
@@ -1252,14 +1386,14 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
         dq.merge_range(r0, 0, r0, 4,
                        "  Unmapped status values (counted as 'Other') — add them to "
                        "STATUS_RULES / STATUS_OVERRIDES",
-                       _f(bold=True, font_size=10, font_color=WHITE, bg_color=CLR_INPROG_D,
+                       _f(bold=True, font_size=10, font_color=WHITE, bg_color=AMBER_D,
                           align="left"))
         for i, (raw, n) in enumerate(sorted(_unmapped_statuses.items(),
                                             key=lambda kv: -kv[1])):
             dq.write(r0 + 1 + i, 0, raw,
-                     _f(align="left", border=1, border_color=GREYLINE))
+                     _f(align="left", border=1, border_color=LINE))
             dq.write(r0 + 1 + i, 1, n,
-                     _f(align="center", border=1, border_color=GREYLINE))
+                     _f(align="center", border=1, border_color=LINE))
 
     # ---- U (union) data sheets ----------------------------------------------
     drop = {"_Module", "_SrcRow", "_creation", "_closure", "_Status", "_Id"}
@@ -1326,6 +1460,8 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
         dw.freeze_panes(1, 0)
         dw.autofilter(0, 0, len(sub), len(headers) - 1)
 
+    sw.activate()
+    sw.set_first_sheet()
     wb.close()
 
 
@@ -1390,6 +1526,13 @@ def main():
         print(f"    {mod:<24} total={tot:<5} "
               f"closed={sb['Closed']:<4} inprog={sb['In Progress']:<4} "
               f"open={sb['Open']:<4} other={sb['Other']}")
+
+    if metrics["mttr_mean"] is not None:
+        print(f"\n  Avg resolution time: {metrics['mttr_mean']:.1f} days "
+              f"(median {metrics['mttr_med']:.1f}) — console only, not a KPI tile")
+    print(f"  All-time status mix ({metrics['alltime_total']:,} incidents): "
+          + ", ".join(f"{l} {c:,}" for l, c in zip(metrics["alltime_labels"],
+                                                   metrics["alltime_counts"])))
 
     if _unmapped_statuses:
         print("\n  Unmapped status values (bucketed as 'Other'):")
