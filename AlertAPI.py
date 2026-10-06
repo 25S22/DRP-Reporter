@@ -244,17 +244,55 @@ def get_incident_status(incident_id):
     """Returns the incident's current status string, or None."""
     payload = api_get(SNAPSHOT_PATH, {"incident_display_id": incident_id})
     if payload is None:
-        return None
-    rows = _rows(payload)
-    if DEBUG_DUMP:
-        log.info("DEBUG snapshot raw for %s:\n%s", incident_id, json.dumps(payload, indent=2)[:3000])
-    for row in rows:
-        if row.get("incidentDisplayId") == incident_id or len(rows) == 1:
-            st = _pick(row, ["status", "incidentStatus", "currentStatus"])
+        log.warning("%s: snapshot call failed (see the API error logged just above). "
+                    "Trying changelog fallback.", incident_id)
+    else:
+        rows = _rows(payload)
+        if DEBUG_DUMP:
+            log.info("DEBUG snapshot raw for %s:\n%s", incident_id, json.dumps(payload, indent=2)[:3000])
+        match = [r for r in rows if isinstance(r, dict) and r.get("incidentDisplayId") == incident_id]
+        if not match and len(rows) == 1 and isinstance(rows[0], dict):
+            match = rows
+        if not match:
+            log.warning("%s: snapshot returned %d row(s), none matching this ID. "
+                        "Top-level response keys: %s. Trying changelog fallback.",
+                        incident_id, len(rows),
+                        list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__)
+        else:
+            row = match[0]
+            st = _pick(row, ["status", "incidentStatus", "currentStatus", "state", "incident_status"])
             if isinstance(st, dict):
                 st = _pick(st, ["name", "value", "status"])
-            return str(st) if st else None
+            if st:
+                return str(st)
+            log.warning("%s: snapshot row has no recognised status field. Row keys: %s. "
+                        "Trying changelog fallback.", incident_id, list(row.keys()))
+
+    # Fallback: latest status-change row in the changelog (documented: currentState.status)
+    rows = fetch_changelog_rows(incident_id)
+    status_rows = [r for r in rows if "status" in str(r.get("actionType", "")).lower()]
+    status_rows.sort(key=_sort_key)
+    for r in reversed(status_rows):
+        st = _pick(r.get("currentState"), ["status"])
+        if st:
+            log.info("%s: status '%s' taken from changelog fallback.", incident_id, st)
+            return str(st)
+    log.error("%s: no status found in snapshot or changelog (%d changelog rows seen).",
+              incident_id, len(rows))
     return None
+
+
+_changelog_cache = {}
+
+
+def fetch_changelog_rows(incident_id):
+    """Changelog rows for one incident, cached (changelog budget is 100 requests/hour)."""
+    if incident_id not in _changelog_cache:
+        payload = api_get(CHANGELOG_PATH, {"entity_identifier": incident_id, "limit": 200})
+        if DEBUG_DUMP and payload is not None:
+            log.info("DEBUG changelog raw for %s:\n%s", incident_id, json.dumps(payload, indent=2)[:6000])
+        _changelog_cache[incident_id] = _rows(payload) if payload is not None else []
+    return _changelog_cache[incident_id]
 
 
 def _sort_key(row):
@@ -274,12 +312,7 @@ def get_latest_comment(incident_id):
     publish the field that carries the comment text, so we look in currentState and
     top-level row keys. Use --debug-dump once to confirm the field name for your tenant.
     """
-    payload = api_get(CHANGELOG_PATH, {"entity_identifier": incident_id, "limit": 200})
-    if payload is None:
-        return None
-    rows = _rows(payload)
-    if DEBUG_DUMP:
-        log.info("DEBUG changelog raw for %s:\n%s", incident_id, json.dumps(payload, indent=2)[:6000])
+    rows = fetch_changelog_rows(incident_id)
 
     comment_rows = []
     for r in rows:
