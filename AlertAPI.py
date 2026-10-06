@@ -45,6 +45,12 @@ SNAPSHOT_PATH = "/v2/snapshot/incident"
 CHANGELOG_PATH = "/v2/changelog"
 CLOUDSEK_TOKEN = os.getenv("CLOUDSEK_TOKEN", "")
 
+# Path to your organisation's CA bundle / SSL certificate (.pem or .crt) used to verify
+# HTTPS connections, e.g. when a corporate proxy re-signs traffic.
+# Example: r"C:\certs\company-ca-bundle.pem"
+# Leave as "" to use the default trusted CA store.
+SSL_CERT_PATH = r""
+
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 5
 DEFAULT_RETRY_AFTER = 30
@@ -166,8 +172,13 @@ def api_get(path, params):
         if gap > 0:
             time.sleep(gap)
         try:
-            resp = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+            resp = requests.get(url, headers=headers, params=params,
+                                timeout=REQUEST_TIMEOUT, verify=SSL_CERT_PATH or True)
             _last_call = time.monotonic()
+        except requests.exceptions.SSLError as exc:
+            log.error("SSL verification failed for %s using %s: %s",
+                      path, SSL_CERT_PATH or "default CA store", exc)
+            return None   # retrying will not fix a certificate problem
         except requests.RequestException as exc:
             _last_call = time.monotonic()
             log.error("API request error (attempt %d/%d): %s", attempt, MAX_RETRIES, exc)
@@ -344,6 +355,9 @@ def main():
 
     if not CLOUDSEK_TOKEN:
         log.critical("CLOUDSEK_TOKEN environment variable is not set.")
+        return 1
+    if SSL_CERT_PATH and not os.path.isfile(SSL_CERT_PATH):
+        log.critical("SSL_CERT_PATH does not point to a file: %s", SSL_CERT_PATH)
         return 1
 
     if args.test_id:
