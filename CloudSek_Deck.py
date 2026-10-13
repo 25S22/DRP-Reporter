@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ===============================================================================
- INCIDENT REPORT GENERATOR  ·  v3.0  ("strong build")
+ INCIDENT REPORT GENERATOR  ·  v3.1  (Excel dashboard + one-slide executive PPT)
 ===============================================================================
 
 WHAT CHANGED vs v2 (the three problems you reported)
@@ -48,6 +48,12 @@ WHAT CHANGED vs v2 (the three problems you reported)
 
 ALSO ADDED
 -------------------------------------------------------------------------------
+   · Matching single-slide executive PowerPoint built from the same metric bundle
+     as Excel; bottom-left space is left blank for monthly incident-triage notes
+   · Executive KPI tiles with prior-period comparisons in both outputs
+   · Rolling six-month created-vs-closed trend and open-incident ageing risk
+   · Editable triage-notes area on the Excel dashboard
+   · Open Backlog worksheet with current Open / In Progress detail and age buckets
    · Column-name auto-resolution ("Incident ID" == "incident id" == "Incident_Id")
    · MTTR KPI (mean + median resolution time) and a 5-tile scorecard
    · Monthly trend chart (created vs closed) with a moving picture of backlog
@@ -60,12 +66,14 @@ ALSO ADDED
    · Cached formula values (totals render in LibreOffice / Sheets / previewers)
    · Print setup, tab colours, hidden gridlines, frozen panes
 
+REQUIRED PACKAGES
+-------------------------------------------------------------------------------
+     pip install pandas xlsxwriter python-pptx python-dateutil
+
 OPTIONAL EXTRA LIBRARY (not required, auto-detected)
 -------------------------------------------------------------------------------
      pip install dateparser
    Only helps if your source has natural-language or non-English dates.
-   Everything else runs on pandas + xlsxwriter + python-dateutil, which you
-   already have.
 ===============================================================================
 """
 
@@ -82,6 +90,12 @@ import pandas as pd
 import xlsxwriter
 from xlsxwriter.utility import xl_col_to_name
 from pandas.api.types import is_datetime64_any_dtype
+
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.util import Inches, Pt
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -124,6 +138,14 @@ DEDUPE_ACROSS_MODULES = False   # False: an ID may legitimately exist in two
 EMAIL_SCOPE           = "period"  # "period" (in-range only) or "all"
 STATUS_FOR_EMAILS     = "closed - resolved"
 MAX_DQ_ROWS           = 500     # cap rows written to the Data Quality sheet
+
+# --- executive outputs ------------------------------------------------------
+GENERATE_PPTX         = True    # create a matching, single-slide executive deck
+TREND_MONTHS          = 6       # rolling months ending in the report month
+TOP_N_MODULES         = 4       # top incident sources shown on the PPT
+AGED_DAYS             = 90      # open/in-progress ageing threshold for risk callout
+PPT_TRIAGE_NOTES_TITLE = "INCIDENTS TRIAGED THIS MONTH"
+PPT_FONT              = "Calibri"
 
 # --- status bucketing ---------------------------------------------------------
 # Exact matches win first (compare lowercased + trimmed), then keyword rules in
@@ -572,6 +594,97 @@ def dedupe(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat([with_id, without]).sort_index()
 
 
+def _period_snapshot(master: pd.DataFrame, start_dt, end_dt) -> dict:
+    """Small, side-effect-free summary used to compare the current period with its predecessor."""
+    created_mask = master["_creation"].between(start_dt, end_dt)
+    closed_mask = master["_closure"].between(start_dt, end_dt)
+    created = dedupe(master[created_mask].copy())
+    closed = dedupe(master[closed_mask].copy())
+    union = dedupe(master[created_mask | closed_mask].copy())
+    total = len(union)
+    status_counts = union["_Status"].value_counts() if total else pd.Series(dtype=int)
+    n_closed_status = int(status_counts.get("Closed", 0))
+    mttr_mean = mttr_med = None
+    if len(closed):
+        valid = closed.dropna(subset=["_creation", "_closure"])
+        if len(valid):
+            days = (valid["_closure"] - valid["_creation"]).dt.total_seconds() / 86400.0
+            days = days[days >= 0]
+            if len(days):
+                mttr_mean, mttr_med = float(days.mean()), float(days.median())
+    return {
+        "total": total, "n_created": len(created), "n_closed": len(closed),
+        "n_closed_status": n_closed_status,
+        "resolution_rate": (n_closed_status / total * 100.0) if total else None,
+        "net_backlog_change": len(created) - len(closed),
+        "mttr_mean": mttr_mean, "mttr_med": mttr_med,
+    }
+
+
+def _prior_period_window(start_dt, end_dt):
+    """Previous full calendar month, or the same-length period immediately before this one."""
+    start = pd.Timestamp(start_dt).normalize()
+    end = pd.Timestamp(end_dt).normalize()
+    is_month = start.day == 1 and end == (start + pd.offsets.MonthEnd(0)).normalize()
+    if is_month:
+        prev_start = start - pd.offsets.MonthBegin(1)
+        label = "prior month"
+    else:
+        span = (end + pd.Timedelta(days=1)) - start
+        prev_start = start - span
+        label = "prior period"
+    prev_end = start - pd.Timedelta(seconds=1)
+    return prev_start, prev_end, label
+
+
+def _aging_snapshot(master: pd.DataFrame, end_dt) -> dict:
+    """Age currently open/in-progress records at the reporting period end."""
+    all_rows = dedupe(master.copy())
+    active = all_rows[all_rows["_Status"].isin(["Open", "In Progress"])].copy()
+    cutoff = pd.Timestamp(end_dt)
+    # Exclude records created after the reporting cutoff; retain missing-date rows for QA.
+    active = active[active["_creation"].isna() | active["_creation"].le(cutoff)].copy()
+    no_date = int(active["_creation"].isna().sum())
+    age = (cutoff.normalize() - active["_creation"].dt.normalize()).dt.days
+    age = age.where(age >= 0)
+    active["Age (days)"] = age
+
+    def _age_bucket(value):
+        if pd.isna(value):
+            return "No creation date"
+        if value <= 7:
+            return "0–7 days"
+        if value <= 30:
+            return "8–30 days"
+        if value <= AGED_DAYS:
+            return f"31–{AGED_DAYS} days"
+        return f">{AGED_DAYS} days"
+
+    active["Age Bucket"] = active["Age (days)"].map(_age_bucket)
+    active["_age_sort"] = active["Age (days)"].fillna(-1)
+    active = active.sort_values("_age_sort", ascending=False, kind="mergesort").drop(columns=["_age_sort"])
+    # Present both source fields and normalized/parsed audit fields on the detail tab.
+    active = active.rename(columns={
+        "_Module": "Module (worksheet)", "_SrcRow": "Source Excel Row", "_creation": "Parsed Created Date",
+        "_closure": "Parsed Closure Date", "_Status": "Normalized Status", "_Id": "Normalized Incident ID",
+    })
+    known_ages = active["Age (days)"].dropna()
+    buckets = {
+        "0–7 days": int((known_ages <= 7).sum()),
+        "8–30 days": int(((known_ages > 7) & (known_ages <= 30)).sum()),
+        f"31–{AGED_DAYS} days": int(((known_ages > 30) & (known_ages <= AGED_DAYS)).sum()),
+        f">{AGED_DAYS} days": int((known_ages > AGED_DAYS).sum()),
+        "No creation date": no_date,
+    }
+    oldest_age = int(known_ages.max()) if len(known_ages) else None
+    return {
+        "active_total": int(len(active)), "aged_over_threshold": buckets[f">{AGED_DAYS} days"],
+        "oldest_age": oldest_age, "no_date": no_date, "buckets": buckets,
+        "detail": active,
+    }
+
+
+
 # =============================================================================
 # AGGREGATION — every number below comes from the same frames
 # =============================================================================
@@ -640,15 +753,18 @@ def build_metrics(master: pd.DataFrame, modules: list[str],
                            "Column": COL_CLOSURE_DATE, "Row": "",
                            "Detail": f"{bad} row(s) excluded from MTTR"})
 
-    # monthly trend inside the period
-    months = pd.period_range(start_dt.to_period("M"), end_dt.to_period("M"), freq="M")
-    cm = created["_creation"].dt.to_period("M").value_counts() if len(created) \
-        else pd.Series(dtype=int)
-    km = closed["_closure"].dt.to_period("M").value_counts() if len(closed) \
-        else pd.Series(dtype=int)
-    trend_labels  = [p.strftime("%b %Y") for p in months]
-    trend_created = [int(cm.get(p, 0)) for p in months]
-    trend_closed  = [int(km.get(p, 0)) for p in months]
+    # Rolling monthly trend ending in the report month (not limited to the selected period).
+    last_month = end_dt.to_period("M")
+    months = pd.period_range(last_month - (TREND_MONTHS - 1), last_month, freq="M")
+    trend_labels, trend_created, trend_closed = [], [], []
+    for month in months:
+        month_start = month.start_time
+        month_end = min(month.end_time, pd.Timestamp(end_dt))
+        month_created = dedupe(master[master["_creation"].between(month_start, month_end)].copy())
+        month_closed = dedupe(master[master["_closure"].between(month_start, month_end)].copy())
+        trend_labels.append(month.strftime("%b %y"))
+        trend_created.append(len(month_created))
+        trend_closed.append(len(month_closed))
 
     # ALL-TIME status mix - every incident in the file, ignoring the date range
     alltime = dedupe(master.copy())
@@ -676,6 +792,9 @@ def build_metrics(master: pd.DataFrame, modules: list[str],
         "trend_closed": trend_closed,
         "emails": emails, "total_union": total_union,
         "n_created": len(created), "n_closed": len(closed),
+        "n_closed_status": int(vc.get("Closed", 0)),
+        "resolution_rate": (int(vc.get("Closed", 0)) / total_union * 100.0) if total_union else None,
+        "net_backlog_change": len(created) - len(closed),
     }
     reconcile(metrics)
     return metrics
@@ -746,6 +865,20 @@ def _progress_bar(pct: float, width: int = 15) -> str:
 
 def _rows_for(px: int, row_px: int = 20) -> int:
     return int(math.ceil(px / row_px)) + 2
+
+
+def _days_text(value) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{value:.1f} d" if value < 10 else f"{value:.0f} d"
+
+
+def _period_label(start_dt, end_dt) -> str:
+    start = pd.Timestamp(start_dt).normalize()
+    end = pd.Timestamp(end_dt).normalize()
+    if start.day == 1 and start.month == end.month and start.year == end.year and end.day == end.days_in_month:
+        return start.strftime("%B %Y")
+    return f"{start:%d %b %Y} – {end:%d %b %Y}"
 
 
 def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
@@ -908,20 +1041,71 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
     sw.write_blank(2, CN + 1, None, f_canvas)
     band(3, 10)
 
-    # ------------------------------------------------------------- KPI cards
+    # ------------------------------------------------------------- executive KPI cards
     KPI = 4
+    prior = m.get("prior_period")
+    prior_label = m.get("prior_label", "prior period")
+
+    def _count_delta(current, previous):
+        if previous is None:
+            return "No prior-period data", MUTED
+        if previous == 0:
+            return ("New vs prior 0" if current else "Flat vs prior"), MUTED
+        change = (current - previous) / previous * 100.0
+        arrow = "▲" if change > 0.5 else "▼" if change < -0.5 else "▬"
+        return f"{arrow} {abs(change):.0f}% vs {prior_label}", MUTED
+
+    def _point_delta(current, previous, lower_is_better=False):
+        if previous is None or current is None:
+            return "No prior-period data", MUTED
+        change = current - previous
+        if abs(change) < 0.05:
+            return f"Flat vs {prior_label}", MUTED
+        arrow = "▲" if change > 0 else "▼"
+        colour = GREEN_D if (change < 0 if lower_is_better else change > 0) else RED_D
+        return f"{arrow} {abs(change):.1f} pts vs {prior_label}", colour
+
+    net_change = int(m["n_created"] - m["n_closed"])
+    resolution_delta, resolution_delta_colour = _point_delta(
+        m.get("resolution_rate"), prior.get("resolution_rate") if prior else None)
+    if m.get("mttr_med") is not None and prior and prior.get("mttr_med") is not None:
+        mttr_change = m["mttr_med"] - prior["mttr_med"]
+        mttr_pct = (mttr_change / prior["mttr_med"] * 100.0) if prior["mttr_med"] else None
+        if mttr_pct is None:
+            mttr_delta, mttr_delta_colour = "Prior median was 0 days", MUTED
+        elif abs(mttr_pct) < 0.5:
+            mttr_delta, mttr_delta_colour = f"Flat vs {prior_label}", MUTED
+        else:
+            mttr_delta = f"{'▼' if mttr_pct < 0 else '▲'} {abs(mttr_pct):.0f}% vs {prior_label}"
+            mttr_delta_colour = GREEN_D if mttr_pct < 0 else RED_D
+    else:
+        mttr_delta, mttr_delta_colour = "No prior-period data", MUTED
+
+    if prior:
+        prior_net_text = f"Prior-period net: {prior['net_backlog_change']:+,}"
+    else:
+        prior_net_text = "No prior-period data"
+    if net_change > 0:
+        net_colour, net_caption = RED, "Backlog growing · created > closed"
+    elif net_change < 0:
+        net_colour, net_caption = GREEN, "Backlog shrinking · closed > created"
+    else:
+        net_colour, net_caption = GREY, "Backlog flat · created = closed"
+
     tiles = [
-        ("TOTAL IN PERIOD", f"{m['total_union']:,}",
-         f"of {m['alltime_total']:,} incidents in the whole file",
-         ACCENT, m['total_union'] / (m['alltime_total'] or 1) * 100),
-        ("CLOSED",          f"{closed:,}",  "resolved within the period",
-         GREEN, res_rate),
-        ("IN PROGRESS",     f"{inprog:,}",  "actively being worked",
-         AMBER, inprog / total * 100),
-        ("OPEN / PENDING",  f"{openc:,}",   "not yet picked up",
-         RED, openc / total * 100),
-        ("RESOLUTION RATE", f"{res_rate:.0f}%", "closed ÷ total in period",
-         GREEN if res_rate >= 80 else AMBER if res_rate >= 60 else RED, res_rate),
+        ("INCIDENTS IN PERIOD", f"{m['total_union']:,}",
+         _count_delta(m['total_union'], prior['total'] if prior else None)[0],
+         f"{m['n_created']:,} created · {m['n_closed']:,} closed", ACCENT, MUTED),
+        ("INCIDENTS CLOSED", f"{m['n_closed']:,}",
+         _count_delta(m['n_closed'], prior['n_closed'] if prior else None)[0],
+         "Closure-date events in this period", GREEN, MUTED),
+        ("RESOLUTION RATE", f"{res_rate:.0f}%",
+         resolution_delta, "Closed status ÷ incidents in period",
+         GREEN if res_rate >= 80 else AMBER if res_rate >= 60 else RED, resolution_delta_colour),
+        ("NET BACKLOG CHANGE", f"{net_change:+,}", prior_net_text,
+         net_caption, net_colour, RED_D if net_change > 0 else GREEN_D if net_change < 0 else MUTED),
+        ("MEDIAN TIME TO RESOLVE", _days_text(m.get("mttr_med")),
+         mttr_delta, "Closed in period with valid dates", ACCENT_D, mttr_delta_colour),
     ]
     sw.set_row(KPI, 5); sw.set_row(KPI + 1, 17); sw.set_row(KPI + 2, 42)
     sw.set_row(KPI + 3, 15); sw.set_row(KPI + 4, 14)
@@ -929,7 +1113,7 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
         sw.write_blank(r, GUTTER, None, f_canvas)
         sw.write_blank(r, CN + 1, None, f_canvas)
     step = (CN - C0 + 1) // len(tiles)
-    for bi, (label, value, caption, colour, pct) in enumerate(tiles):
+    for bi, (label, value, delta_text, caption, colour, delta_colour) in enumerate(tiles):
         c1 = C0 + bi * step
         c2 = CN if bi == len(tiles) - 1 else c1 + step - 1
         side = dict(left=1, right=1, left_color=LINE, right_color=LINE)
@@ -938,11 +1122,11 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
           _f(bold=True, font_size=9, font_color=MUTED, bg_color=WHITE,
              align="left", **side))
         W(KPI + 2, c1, c2, value,
-          _f(bold=True, font_size=30, font_color=INK, bg_color=WHITE,
+          _f(bold=True, font_size=27, font_color=INK, bg_color=WHITE,
              align="center", **side))
-        W(KPI + 3, c1, c2, _progress_bar(pct, 18),
-          _f(font_size=8, bold=True, font_color=colour, bg_color=WHITE,
-             align="center", font_name="Consolas", **side))
+        W(KPI + 3, c1, c2, delta_text,
+          _f(font_size=8, bold=True, font_color=delta_colour, bg_color=WHITE,
+             align="center", **side))
         W(KPI + 4, c1, c2, f"  {caption}",
           _f(font_size=8, italic=True, font_color=MUTED, bg_color=WHITE,
              align="left", bottom=1, bottom_color=LINE, **side))
@@ -951,7 +1135,8 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
     cursor = KPI + 5
     band(cursor, 12); cursor += 1
 
-    # --------------------------------------------------------- insight cards
+    # --------------------------------------------------------- executive insight cards
+    aging = m.get("aging", {"aged_over_threshold": 0, "oldest_age": None})
     boxes = [("MOST IMPACTED MODULE", ACCENT, ACCENT_L,
               (str(mods[0])[:24] if mods else "—"),
               f"{(m['module_totals'][0] if mods else 0):,} incidents in period")]
@@ -962,12 +1147,16 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
     boxes.append(("OPEN BACKLOG · ALL TIME", RED, RED_L,
                   f"{m['alltime_backlog']:,}",
                   f"open + in progress across all {m['alltime_total']:,} incidents"))
-    if m["user_names"]:
-        boxes.append(("TOP CLOSER", ACCENT_D, ACCENT_L,
-                      str(m["user_names"][0])[:22],
-                      f"{m['user_counts'][0]:,} closed in period"))
+    boxes.append((f"OPEN ITEMS > {AGED_DAYS} DAYS", RED if aging.get("aged_over_threshold", 0) else GREEN,
+                  RED_L if aging.get("aged_over_threshold", 0) else GREEN_L,
+                  f"{aging.get('aged_over_threshold', 0):,}",
+                  f"oldest known item: {_days_text(aging.get('oldest_age'))}" if aging.get("oldest_age") is not None else "no dated open items"))
+    boxes.append(("DATA QUALITY FLAGS", AMBER if m.get("quality_flag_count", 0) else GREEN,
+                  AMBER_L if m.get("quality_flag_count", 0) else GREEN_L,
+                  f"{m.get('quality_flag_count', 0):,}",
+                  "excluding auto-matched headers"))
 
-    section(cursor, "Key insights", "auto-generated from the period data")
+    section(cursor, "Key insights", "executive takeaways from period data")
     cursor += 1
     sw.set_row(cursor, 5); sw.set_row(cursor + 1, 16)
     sw.set_row(cursor + 2, 34); sw.set_row(cursor + 3, 16)
@@ -992,6 +1181,20 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
              align="left", bottom=1, bottom_color=LINE, **side))
         c1 = c2 + 1
     cursor += 4
+    band(cursor, 12); cursor += 1
+
+    # --------------------------------------------------------- manual triage notes
+    section(cursor, "Incidents triaged this month",
+            "editable blank space for the monthly executive narrative")
+    cursor += 1
+    note_fmt = _f(bg_color=WHITE, border=1, border_color=LINE,
+                   font_color=SLATE, align="left", valign="top", text_wrap=True)
+    for note_row in range(cursor, cursor + 3):
+        sw.set_row(note_row, 28)
+        sw.write_blank(note_row, GUTTER, None, f_canvas)
+        sw.merge_range(note_row, C0, note_row, CN, "", note_fmt)
+        sw.write_blank(note_row, CN + 1, None, f_canvas)
+    cursor += 3
     band(cursor, 12); cursor += 1
 
     # ------------------------------------------------------- module break-down
@@ -1205,7 +1408,7 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
 
     # ------------------------------------------------------------ trend chart
     if NT >= 2:
-        section(cursor, "Monthly trend", "created vs closed, inside the period")
+        section(cursor, "Monthly trend", f"created vs closed · rolling {TREND_MONTHS} months through report end")
         cursor += 1
         trend = wb.add_chart({"type": "line"})
         for name, col, colour in (("Created", 13, ACCENT), ("Closed", 14, GREEN)):
@@ -1309,7 +1512,7 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
     sw.write_blank(cursor, GUTTER, None, f_canvas)
     W(cursor, C0, CN,
       f"  Every figure above is de-duplicated and reconciled against the same "
-      f"source rows  ·  {len(issues):,} data-quality item(s) logged on the "
+      f"source rows  ·  {m.get('quality_flag_count', len(issues)):,} data-quality flag(s) logged on the "
       f"'{DQ_SHEET_NAME}' tab", f_note)
     sw.write_blank(cursor, CN + 1, None, f_canvas)
 
@@ -1395,6 +1598,66 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
             dq.write(r0 + 1 + i, 1, n,
                      _f(align="center", border=1, border_color=LINE))
 
+    # ---- open backlog detail -------------------------------------------------
+    ob = wb.add_worksheet("Open Backlog")
+    ob.hide_gridlines(2)
+    ob.set_tab_color(RED if m.get("aging", {}).get("aged_over_threshold", 0) else GREEN)
+    open_df = m.get("aging", {}).get("detail", pd.DataFrame()).copy()
+    ob_headers = list(open_df.columns)
+    last_col = max(len(ob_headers) - 1, 0)
+    ob.set_row(0, 38)
+    ob.merge_range(0, 0, 0, last_col,
+                   f"Open Backlog at {pd.Timestamp(end_dt).strftime('%d %b %Y')}  |  "
+                   f"{len(open_df):,} Open / In Progress item(s)",
+                   _f(bold=True, font_size=13, font_color=WHITE, bg_color=INK, align="center"))
+    ob_header = _f(bold=True, font_color=WHITE, bg_color=INK, align="center",
+                   border=1, border_color=INK, text_wrap=True)
+    for ci, h in enumerate(ob_headers):
+        ob.write(2, ci, str(h), ob_header)
+        width = max(len(str(h)) + 3, 13)
+        if h in {COL_CREATION_DATE, COL_CLOSURE_DATE, "Parsed Created Date", "Parsed Closure Date"}:
+            width = 22
+        elif h in {"Comment", "Summary", "Description"}:
+            width = 36
+        elif h in {"Age Bucket", "Normalized Status", "Module"}:
+            width = 20
+        ob.set_column(ci, ci, min(width, 42))
+    ob.freeze_panes(3, 0)
+    if ob_headers and len(open_df):
+        for ri, vals in enumerate(open_df.itertuples(index=False, name=None), start=3):
+            alt = (ri % 2 == 0)
+            for ci, v in enumerate(vals):
+                fmt = _f(align="left", border=1, border_color=LINE,
+                         bg_color=LINE_SOFT if alt else WHITE, font_color=INK)
+                if ob_headers[ci] in {COL_CREATION_DATE, COL_CLOSURE_DATE, "Parsed Created Date", "Parsed Closure Date"}:
+                    fmt = _f(align="left", border=1, border_color=LINE,
+                             bg_color=LINE_SOFT if alt else WHITE, font_color=INK,
+                             num_format="dd mmm yyyy hh:mm")
+                try:
+                    nil = pd.isna(v)
+                except (TypeError, ValueError):
+                    nil = False
+                if nil:
+                    ob.write_blank(ri, ci, None, fmt)
+                elif isinstance(v, (pd.Timestamp, datetime)):
+                    ob.write_datetime(ri, ci, pd.Timestamp(v).to_pydatetime(), fmt)
+                elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                    ob.write_number(ri, ci, v, fmt)
+                else:
+                    ob.write(ri, ci, str(v) if not isinstance(v, str) else v, fmt)
+        ob.autofilter(2, 0, 2 + len(open_df), len(ob_headers) - 1)
+        if "Age (days)" in ob_headers:
+            age_col = ob_headers.index("Age (days)")
+            ob.conditional_format(3, age_col, 2 + len(open_df), age_col, {
+                "type": "cell", "criteria": ">", "value": AGED_DAYS,
+                "format": _f(bg_color=RED_L, font_color=RED_D, bold=True)})
+    elif ob_headers:
+        ob.merge_range(3, 0, 3, last_col, "No Open or In Progress incidents at the reporting cutoff.",
+                       _f(bold=True, font_size=11, font_color=GREEN_D, bg_color=GREEN_L, align="left"))
+    else:
+        ob.merge_range(2, 0, 2, 2, "No open backlog columns were available.",
+                       _f(italic=True, font_color=MUTED))
+
     # ---- U (union) data sheets ----------------------------------------------
     drop = {"_Module", "_SrcRow", "_creation", "_closure", "_Status", "_Id"}
     date_cols = {c for c in (COL_CREATION_DATE, COL_CLOSURE_DATE) if c}
@@ -1466,6 +1729,278 @@ def build_workbook(m: dict, modules: list[str], master: pd.DataFrame,
 
 
 # =============================================================================
+# SINGLE-SLIDE EXECUTIVE POWERPOINT
+# =============================================================================
+
+def _ppt_rgb(value: str) -> RGBColor:
+    return RGBColor.from_string(value.lstrip("#"))
+
+
+def _ppt_rect(slide, x, y, w, h, fill, line=None, radius=True):
+    shape_type = MSO_SHAPE.ROUNDED_RECTANGLE if radius else MSO_SHAPE.RECTANGLE
+    shape = slide.shapes.add_shape(shape_type, Inches(x), Inches(y), Inches(w), Inches(h))
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = _ppt_rgb(fill)
+    if line:
+        shape.line.color.rgb = _ppt_rgb(line)
+        shape.line.width = Pt(0.8)
+    else:
+        shape.line.fill.background()
+    return shape
+
+
+def _ppt_text(slide, x, y, w, h, text, size=10, color=SLATE, bold=False,
+              align=PP_ALIGN.LEFT, valign=MSO_ANCHOR.MIDDLE, italic=False,
+              font_name=None):
+    shape = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    tf = shape.text_frame
+    tf.clear()
+    tf.word_wrap = True
+    tf.margin_left = Inches(0.02)
+    tf.margin_right = Inches(0.02)
+    tf.margin_top = Inches(0.01)
+    tf.margin_bottom = Inches(0.01)
+    tf.vertical_anchor = valign
+    p = tf.paragraphs[0]
+    p.alignment = align
+    r = p.add_run()
+    r.text = str(text)
+    r.font.name = font_name or PPT_FONT
+    r.font.size = Pt(size)
+    r.font.bold = bold
+    r.font.italic = italic
+    r.font.color.rgb = _ppt_rgb(color)
+    return shape
+
+
+def _ppt_signed(value) -> str:
+    value = int(value or 0)
+    return f"+{value:,}" if value > 0 else (f"−{abs(value):,}" if value < 0 else "0")
+
+
+def _ppt_count_delta(current, previous, prior_label):
+    if previous is None:
+        return "No prior-period data", MUTED
+    if previous == 0:
+        return ("New vs prior 0" if current else f"Flat vs {prior_label}"), MUTED
+    delta = (current - previous) / previous * 100.0
+    if abs(delta) < 0.5:
+        return f"Flat vs {prior_label}", MUTED
+    arrow = "▲" if delta > 0 else "▼"
+    return f"{arrow} {abs(delta):.0f}% vs {prior_label}", MUTED
+
+
+def _ppt_point_delta(current, previous, prior_label, lower_is_better=False):
+    if current is None or previous is None:
+        return "No prior-period data", MUTED
+    delta = current - previous
+    if abs(delta) < 0.05:
+        return f"Flat vs {prior_label}", MUTED
+    arrow = "▲" if delta > 0 else "▼"
+    good = delta < 0 if lower_is_better else delta > 0
+    return f"{arrow} {abs(delta):.1f} pts vs {prior_label}", GREEN_D if good else RED_D
+
+
+def build_powerpoint(m: dict, issues: list, start_dt, end_dt, output_path: str) -> None:
+    """Write the one-slide executive summary using the exact same metric bundle as Excel."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    prs.core_properties.title = f"Incident Review — {_period_label(start_dt, end_dt)}"
+    prs.core_properties.subject = "Monthly executive incident summary"
+    prs.core_properties.author = "Incident Report Generator"
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
+    slide.background.fill.solid()
+    slide.background.fill.fore_color.rgb = _ppt_rgb(WHITE)
+
+    # Header banner
+    _ppt_rect(slide, 0, 0, 13.333, 0.78, INK, radius=False)
+    _ppt_rect(slide, 0, 0, 0.09, 0.78, ACCENT, radius=False)
+    period_title = f"{start_dt:%d %b %Y} – {end_dt:%d %b %Y}"
+    _ppt_text(slide, 0.43, 0.08, 6.2, 0.18, "MONTHLY INCIDENT REVIEW", 8.5, "A5B4FC", True)
+    _ppt_text(slide, 0.43, 0.28, 8.1, 0.36,
+              f"Incident performance & risk — {_period_label(start_dt, end_dt)}",
+              20, WHITE, True)
+    _ppt_text(slide, 9.15, 0.28, 3.75, 0.28, period_title, 10, "CBD5E1", False,
+              align=PP_ALIGN.RIGHT)
+
+    prior = m.get("prior_period")
+    prior_label = m.get("prior_label", "prior period")
+    closed_status = int(m.get("n_closed_status", 0))
+    total = int(m.get("total_union", 0))
+    resolution_rate = m.get("resolution_rate")
+    net = int(m.get("net_backlog_change", m["n_created"] - m["n_closed"]))
+    aging = m.get("aging", {"aged_over_threshold": 0, "oldest_age": None})
+    median = m.get("mttr_med")
+
+    total_delta, total_delta_color = _ppt_count_delta(
+        total, prior.get("total") if prior else None, prior_label)
+    rate_delta, rate_delta_color = _ppt_point_delta(
+        resolution_rate, prior.get("resolution_rate") if prior else None, prior_label)
+    if median is not None and prior and prior.get("mttr_med") is not None:
+        prev_med = prior["mttr_med"]
+        if prev_med == 0:
+            mttr_delta, mttr_delta_color = "Prior median was 0 days", MUTED
+        else:
+            pct = (median - prev_med) / prev_med * 100.0
+            if abs(pct) < 0.5:
+                mttr_delta, mttr_delta_color = f"Flat vs {prior_label}", MUTED
+            else:
+                mttr_delta = f"{'▼' if pct < 0 else '▲'} {abs(pct):.0f}% vs {prior_label}"
+                mttr_delta_color = GREEN_D if pct < 0 else RED_D
+    else:
+        mttr_delta, mttr_delta_color = "No prior-period data", MUTED
+
+    if net > 0:
+        net_color, net_caption = RED, "Backlog growing · created > closed"
+    elif net < 0:
+        net_color, net_caption = GREEN, "Backlog shrinking · closed > created"
+    else:
+        net_color, net_caption = GREY, "Backlog flat · created = closed"
+    net_delta = (f"Prior-period net: {_ppt_signed(prior['net_backlog_change'])}"
+                 if prior else "No prior-period data")
+
+    # Four executive KPIs, intentionally aligned with the Excel dashboard.
+    left, gap, card_w, card_y, card_h = 0.44, 0.15, 3.00, 0.94, 1.06
+    kpis = [
+        ("INCIDENTS IN PERIOD", f"{total:,}", total_delta,
+         f"{m['n_created']:,} created · {m['n_closed']:,} closed", ACCENT, total_delta_color),
+        ("RESOLUTION RATE", "—" if resolution_rate is None else f"{resolution_rate:.0f}%",
+         rate_delta, f"{closed_status:,} closed-status items / {total:,}",
+         GREEN if (resolution_rate or 0) >= 80 else AMBER if (resolution_rate or 0) >= 60 else RED,
+         rate_delta_color),
+        ("NET BACKLOG CHANGE", _ppt_signed(net), net_delta, net_caption,
+         net_color, RED_D if net > 0 else GREEN_D if net < 0 else MUTED),
+        ("MEDIAN TIME TO RESOLVE", _days_text(median), mttr_delta,
+         f"Mean: {_days_text(m.get('mttr_mean'))} · valid closure dates",
+         ACCENT_D, mttr_delta_color),
+    ]
+    for i, (label, value, delta, caption, accent, delta_color) in enumerate(kpis):
+        x = left + i * (card_w + gap)
+        _ppt_rect(slide, x, card_y, card_w, card_h, WHITE, LINE)
+        _ppt_rect(slide, x, card_y, card_w, 0.055, accent, radius=False)
+        _ppt_text(slide, x + 0.15, card_y + 0.11, card_w - 0.3, 0.18, label, 8, MUTED, True)
+        _ppt_text(slide, x + 0.15, card_y + 0.29, card_w - 0.3, 0.36, value, 23, INK, True)
+        _ppt_text(slide, x + 0.15, card_y + 0.65, card_w - 0.3, 0.16, delta, 7.7, delta_color, True)
+        _ppt_text(slide, x + 0.15, card_y + 0.82, card_w - 0.3, 0.18, caption, 7.1, MUTED)
+
+    # Mid-left: six-month created vs closed trend (editable shapes).
+    trend_x, trend_y, trend_w, trend_h = 0.44, 2.18, 6.12, 2.29
+    _ppt_rect(slide, trend_x, trend_y, trend_w, trend_h, WHITE, LINE)
+    _ppt_text(slide, trend_x + 0.18, trend_y + 0.09, trend_w - 0.36, 0.21,
+              f"INCIDENT FLOW · LAST {len(m['trend_labels'])} MONTHS", 9, INK, True)
+    legend_y = trend_y + 0.37
+    _ppt_rect(slide, trend_x + 0.19, legend_y + 0.045, 0.10, 0.07, ACCENT, radius=False)
+    _ppt_text(slide, trend_x + 0.32, legend_y, 0.72, 0.16, "Created", 7.3, MUTED)
+    _ppt_rect(slide, trend_x + 1.07, legend_y + 0.045, 0.10, 0.07, GREEN, radius=False)
+    _ppt_text(slide, trend_x + 1.20, legend_y, 0.72, 0.16, "Closed", 7.3, MUTED)
+
+    labels = m["trend_labels"][-TREND_MONTHS:]
+    created_values = m["trend_created"][-TREND_MONTHS:]
+    closed_values = m["trend_closed"][-TREND_MONTHS:]
+    max_val = max(created_values + closed_values + [1])
+    base_y = trend_y + 1.82
+    chart_top = trend_y + 0.70
+    chart_h = base_y - chart_top
+    chart_left = trend_x + 0.25
+    chart_w = trend_w - 0.50
+    group_w = chart_w / max(len(labels), 1)
+    for idx, (month_label, cv, kv) in enumerate(zip(labels, created_values, closed_values)):
+        gx = chart_left + idx * group_w
+        bw = min(0.22, group_w * 0.24)
+        pair_w = bw * 2 + 0.055
+        bx = gx + (group_w - pair_w) / 2
+        ch = max(0.025, chart_h * (cv / max_val)) if cv else 0.018
+        kh = max(0.025, chart_h * (kv / max_val)) if kv else 0.018
+        _ppt_rect(slide, bx, base_y - ch, bw, ch, ACCENT, radius=False)
+        _ppt_rect(slide, bx + bw + 0.055, base_y - kh, bw, kh, GREEN, radius=False)
+        if cv:
+            _ppt_text(slide, bx - 0.03, max(chart_top - 0.02, base_y - ch - 0.14), bw + 0.06, 0.12,
+                      str(cv), 6.6, ACCENT_D, True, align=PP_ALIGN.CENTER)
+        if kv:
+            _ppt_text(slide, bx + bw + 0.025, max(chart_top - 0.02, base_y - kh - 0.14), bw + 0.06, 0.12,
+                      str(kv), 6.6, GREEN_D, True, align=PP_ALIGN.CENTER)
+        _ppt_text(slide, gx, base_y + 0.04, group_w, 0.16, month_label, 6.7, MUTED,
+                  align=PP_ALIGN.CENTER)
+
+    # Mid-right: top incident modules split by normalized status.
+    mod_x, mod_y, mod_w, mod_h = 6.75, 2.18, 6.14, 2.29
+    _ppt_rect(slide, mod_x, mod_y, mod_w, mod_h, WHITE, LINE)
+    _ppt_text(slide, mod_x + 0.18, mod_y + 0.09, mod_w - 0.36, 0.21,
+              f"TOP {min(TOP_N_MODULES, len(m['module_names']))} INCIDENT SOURCES", 9, INK, True)
+    top_names = m["module_names"][:TOP_N_MODULES]
+    top_totals = m["module_totals"][:TOP_N_MODULES]
+    max_total = max(top_totals + [1])
+    bar_start = mod_x + 1.26
+    bar_max_w = mod_w - 1.92
+    for idx, (name, mod_total) in enumerate(zip(top_names, top_totals)):
+        yy = mod_y + 0.48 + idx * 0.37
+        _ppt_text(slide, mod_x + 0.17, yy - 0.005, 1.01, 0.22,
+                  str(name)[:19], 7.3, SLATE, True)
+        _ppt_rect(slide, bar_start, yy + 0.045, bar_max_w, 0.13, LINE_SOFT, radius=False)
+        seg_x = bar_start
+        for status in STATUS_ORDER:
+            value = int(m["module_status"].get(name, {}).get(status, 0))
+            if not value:
+                continue
+            seg_w = bar_max_w * value / max_total
+            _ppt_rect(slide, seg_x, yy + 0.045, seg_w, 0.13,
+                      _STATUS_RAG[status], radius=False)
+            seg_x += seg_w
+        _ppt_text(slide, mod_x + mod_w - 0.55, yy - 0.005, 0.38, 0.22,
+                  f"{mod_total:,}", 7.5, INK, True, align=PP_ALIGN.RIGHT)
+    legend_statuses = [("Closed", GREEN), ("In progress", AMBER), ("Open", RED), ("Other", GREY)]
+    legend_x = mod_x + 0.18
+    legend_y = mod_y + mod_h - 0.23
+    for lab, col in legend_statuses:
+        _ppt_rect(slide, legend_x, legend_y + 0.045, 0.09, 0.07, col, radius=False)
+        _ppt_text(slide, legend_x + 0.12, legend_y, 0.72, 0.16, lab, 6.7, MUTED)
+        legend_x += 1.05
+
+    # Bottom-left: deliberately blank notes panel for human-written triage summary.
+    notes_x, notes_y, notes_w, notes_h = 0.44, 4.66, 7.48, 2.28
+    _ppt_rect(slide, notes_x, notes_y, notes_w, notes_h, WHITE, LINE)
+    _ppt_rect(slide, notes_x, notes_y, notes_w, 0.055, ACCENT, radius=False)
+    _ppt_text(slide, notes_x + 0.18, notes_y + 0.11, notes_w - 0.36, 0.23,
+              PPT_TRIAGE_NOTES_TITLE, 9, INK, True)
+    # Body intentionally left empty so the team can paste narrative into the slide.
+
+    # Bottom-right: risk and data-quality callouts only; row-level detail stays in Excel.
+    risk_x, risk_y, risk_w, risk_h = 8.10, 4.66, 4.79, 2.28
+    _ppt_rect(slide, risk_x, risk_y, risk_w, risk_h, CANVAS, LINE)
+    _ppt_rect(slide, risk_x, risk_y, 0.055, risk_h, RED if aging.get("aged_over_threshold", 0) else GREEN, radius=False)
+    _ppt_text(slide, risk_x + 0.18, risk_y + 0.11, risk_w - 0.36, 0.23,
+              "ATTENTION REQUIRED", 9, INK, True)
+    quality_count = int(m.get("quality_flag_count", 0))
+    oldest_text = f"{aging['oldest_age']:,} days" if aging.get("oldest_age") is not None else "—"
+    risk_rows = [
+        (f"Open items > {AGED_DAYS} days", f"{aging.get('aged_over_threshold', 0):,}",
+         RED_D if aging.get("aged_over_threshold", 0) else GREEN_D),
+        ("Current open / in-progress backlog", f"{aging.get('active_total', m['alltime_backlog']):,}", SLATE),
+        ("Oldest dated open item", oldest_text, RED_D if aging.get("oldest_age") and aging["oldest_age"] > AGED_DAYS else SLATE),
+        ("Data-quality flags", f"{quality_count:,}", AMBER_D if quality_count else GREEN_D),
+    ]
+    for idx, (label, value, color) in enumerate(risk_rows):
+        yy = risk_y + 0.48 + idx * 0.38
+        _ppt_text(slide, risk_x + 0.18, yy, risk_w - 1.15, 0.22, label, 7.5, MUTED)
+        _ppt_text(slide, risk_x + risk_w - 0.88, yy, 0.62, 0.22, value, 9, color, True,
+                  align=PP_ALIGN.RIGHT)
+        if idx < len(risk_rows) - 1:
+            _ppt_rect(slide, risk_x + 0.18, yy + 0.28, risk_w - 0.36, 0.008, LINE, radius=False)
+
+    # Footer and transparent definition of event counts.
+    _ppt_text(slide, 0.45, 7.10, 12.4, 0.18,
+              "Created = creation date in month · Closed = closure date in month · "
+              f"De-duplication: {'across modules' if DEDUPE_ACROSS_MODULES else 'within module'} · "
+              f"{m.get('quality_flag_count', len(issues)):,} data-quality flag(s) in Excel",
+              6.8, MUTED)
+
+    prs.save(output_path)
+    if len(prs.slides) != 1:
+        raise AssertionError(f"Executive deck must contain exactly one slide; found {len(prs.slides)}")
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -1475,6 +2010,7 @@ def _cli():
     p.add_argument("-o", "--output-folder", default=OUTPUT_FOLDER)
     p.add_argument("-s", "--start", default=None, help='e.g. "1 Jan 2024"')
     p.add_argument("-e", "--end", default=None, help='e.g. "31 Jan 2024"')
+    p.add_argument("--no-pptx", action="store_true", help="write Excel only, overriding GENERATE_PPTX")
     return p.parse_args()
 
 
@@ -1482,7 +2018,7 @@ def main():
     args = _cli()
 
     print("\n" + "=" * 62)
-    print("  INCIDENT REPORT GENERATOR  v3.0")
+    print("  INCIDENT REPORT GENERATOR  v3.1")
     print("=" * 62)
     if not _HAS_DATEPARSER:
         print("  (optional) pip install dateparser  -> extra date-format coverage")
@@ -1519,6 +2055,21 @@ def main():
     print(f"\n  Range: {start_dt:%d %b %Y}  ->  {end_dt:%d %b %Y}\n")
 
     metrics = build_metrics(master, modules, start_dt, end_dt, issues)
+    metrics["current_period"] = _period_snapshot(master, start_dt, end_dt)
+    if metrics["current_period"]["total"] != metrics["total_union"]:
+        raise AssertionError(
+            f"Current-period reconciliation failed: snapshot={metrics['current_period']['total']:,}, "
+            f"dashboard={metrics['total_union']:,}"
+        )
+    prev_start, prev_end, prior_label = _prior_period_window(start_dt, end_dt)
+    prior_summary = _period_snapshot(master, prev_start, prev_end)
+    metrics["prior_period"] = prior_summary if prior_summary["total"] else None
+    metrics["prior_label"] = prior_label
+    metrics["aging"] = _aging_snapshot(master, end_dt)
+    metrics["quality_flag_count"] = (
+        sum(1 for issue in issues if issue.get("Type") != "Header auto-matched")
+        + sum(_unmapped_statuses.values())
+    )
 
     print(f"\n  Modules in period: {len(metrics['module_names'])}")
     for mod, tot in zip(metrics["module_names"], metrics["module_totals"]):
@@ -1540,9 +2091,16 @@ def main():
             print(f"    '{raw}'  x{n}")
 
     os.makedirs(args.output_folder, exist_ok=True)
-    fname = f"Incident Review - {start_dt:%d %b %Y} - {end_dt:%d %b %Y}.xlsx"
-    out = os.path.join(args.output_folder, fname)
+    stem = f"Incident Review - {start_dt:%d %b %Y} - {end_dt:%d %b %Y}"
+    out = os.path.join(args.output_folder, stem + ".xlsx")
     build_workbook(metrics, modules, master, issues, start_dt, end_dt, out)
+
+    ppt_out = os.path.join(args.output_folder, stem + ".pptx")
+    if GENERATE_PPTX and not args.no_pptx:
+        build_powerpoint(metrics, issues, start_dt, end_dt, ppt_out)
+        print(f"  PowerPoint saved -> {ppt_out} (1 slide)")
+    else:
+        print("  PowerPoint skipped (GENERATE_PPTX=False or --no-pptx)")
 
     print(f"\n  Data quality items logged: {len(issues):,}")
     print(f"  Report saved -> {out}")
